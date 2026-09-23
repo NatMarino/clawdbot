@@ -18,6 +18,12 @@
     width: 160px; height: 160px;
   }
   #pet-canvas { image-rendering: pixelated; display: block; }
+  /* the treat shares the buddy's unit space: same box, same scale, laid
+     straight over the pet canvas. Decorative only — never clickable. */
+  #treat-canvas {
+    position: absolute; left: 0; top: 0;
+    image-rendering: pixelated; pointer-events: none;
+  }
 
   /* inside the real Tauri window the pet fills it and debug hides.
      LEFT-anchored: the webview viewport under-reports the window width by
@@ -127,7 +133,7 @@
   }
   /* invisible hit rings: a button's pseudo-element is part of its click
      target — the FORGIVING area extends well past the visible circle */
-  #gearbtn::before, #newbtn::before {
+  #gearbtn::before, #newbtn::before, #treatbtn::before {
     content: ''; position: absolute; inset: -8px; border-radius: 50%;
   }
   .round-btn:hover { background: #c1694f; color: #fff3ea; }
@@ -135,14 +141,30 @@
      (author styles always beat UA styles) — without this the "+" is
      permanently visible, parked unpositioned at the window's top-left */
   .round-btn[hidden] { display: none; }
-  /* hover "+": tiny, centered right below the buddy; opens a new Claude
-     Code session in the desktop app. Yields to the speech bubble. */
-  #newbtn {
-    position: fixed; width: 18px; height: 18px;
+  /* hover buttons: the "+" (a new Claude Code session) and the treat, as a
+     tiny pair centered right below the buddy. They show and hide together
+     and both yield to the speech bubble. ONE positioned element — the row —
+     so placeCenteredOnBuddy() stays the only centering rule. */
+  #petbtns { position: fixed; display: flex; gap: 6px; align-items: center; }
+  #petbtns[hidden] { display: none; } /* flex would override [hidden] */
+  #newbtn, #treatbtn {
+    width: 18px; height: 18px;
     font-size: 13px; line-height: 1;
     box-shadow: 0 2px 8px rgba(0,0,0,.4);
   }
   #newbtn.clicked { background: #c1694f; color: #fff3ea; }
+  /* the treat glyph is drawn as PIXELS (integer-grid rects in currentColor,
+     chips punched out with evenodd so the button shows through) — never an
+     emoji, which would render oversized and spill out of the hit circle */
+  #treatbtn svg { display: block; }
+  /* peckish: hours since the last treat, so the button breathes when it
+     appears. Opacity only — no colour alarm, no JS timer, and it stops the
+     moment he is fed. */
+  @keyframes treat-peckish {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: .5; }
+  }
+  #treatbtn.peckish { animation: treat-peckish 2s ease-in-out infinite; }
   /* popover gear: a real button — the visible circle IS the hit area. The
      glyph is forced to TEXT presentation ('Segoe UI Symbol' + VS15 in JS):
      emoji-style ⚙ renders bigger than the button and spills outside the
@@ -206,6 +228,7 @@
     <button id="gearbtn" class="gear round-btn" title="panel theme">&#9881;&#xFE0E;</button>
   </div>
   <div id="pop-cowork" class="pop-cowork" hidden></div>
+  <div id="pop-treats" class="pop-cowork"></div>
   <div id="theme-row" class="theme-row" hidden>
     <span class="lbl">theme:</span>
     <button data-theme="system">system</button>
@@ -220,7 +243,15 @@
   <div id="pop-sessions"></div>
 </div>
 <div id="bubble" hidden></div>
-<div id="newbtn" class="round-btn" hidden title="New Claude Code session">+</div>
+<div id="petbtns" hidden>
+  <div id="newbtn" class="round-btn" title="New Claude Code session">+</div>
+  <div id="treatbtn" class="round-btn" title="Give Claw'd a treat">
+    <svg viewBox="0 0 6 6" width="12" height="12" shape-rendering="crispEdges" aria-hidden="true" focusable="false">
+      <path fill="currentColor" fill-rule="evenodd"
+            d="M1 0h4v1h1v4h-1v1h-4v-1h-1v-4h1z M1 2h1v1h-1z M4 2h1v1h-1z M2 3h1v1h-1z"/>
+    </svg>
+  </div>
+</div>
 
 <div id="debug">
   <h1>Claw'dbot debug</h1>
@@ -233,6 +264,7 @@
 <script type="module">
   import { Pet } from './pet.js';
   import { STYLES } from './styles.js';
+  import { TreatSprite, FALL_MS } from './treats.js';
 
   const IS_TAURI = !!window.__TAURI__;
   const invoke = IS_TAURI ? window.__TAURI__.core.invoke : null;
@@ -274,8 +306,10 @@
       x = Math.min(x, pr.left); y = Math.min(y, pr.top);
       right = Math.max(right, pr.right); bottom = Math.max(bottom, pr.bottom);
     }
-    if (!btnEl.hidden) {
-      const br = btnEl.getBoundingClientRect();
+    // the hover buttons are one row: its rect is the union of the pair, so
+    // BOTH the "+" and the treat land inside the OS-level clickable region
+    if (!btnsEl.hidden) {
+      const br = btnsEl.getBoundingClientRect();
       x = Math.min(x, br.left); y = Math.min(y, br.top);
       right = Math.max(right, br.right); bottom = Math.max(bottom, br.bottom);
     }
@@ -297,34 +331,44 @@
     invoke('set_opaque_bounds', { x: x * dpr, y: y * dpr, w: (right - x) * dpr, h: (bottom - y) * dpr });
   }
 
-  // --- hover "+": shows by the buddy's shoulder while the cursor is over
-  //     him (or the button itself); opens a new Claude Code session ---
+  // --- hover buttons: the "+" (a new Claude Code session) and the treat
+  //     show together by the buddy's feet while the cursor is over him (or
+  //     over the pair itself) ---
+  const btnsEl = document.getElementById('petbtns');
   const btnEl = document.getElementById('newbtn');
+  const treatBtn = document.getElementById('treatbtn');
   let btnHideTimer = null;
 
   function showNewBtn() {
     clearTimeout(btnHideTimer);
     btnHideTimer = null;
-    // the popover and the speech bubble both supersede it (the bubble owns
-    // the below-the-buddy spot)
-    if (!btnEl.hidden || !popEl.hidden || !bubEl.hidden) return;
+    // the popover and the speech bubble both supersede them (the bubble
+    // owns the below-the-buddy spot), and a meal in progress hides them
+    if (!btnsEl.hidden || !popEl.hidden || !bubEl.hidden || feeding) return;
     const r = wrap.getBoundingClientRect();
     const rb = pet.restBounds();
     const feetCss = r.top + (rb.y + rb.h) * pet.scale;
-    btnEl.style.top = (feetCss + 6) + 'px';
-    btnEl.hidden = false;
-    placeCenteredOnBuddy(btnEl);
+    btnsEl.style.top = (feetCss + 6) + 'px';
+    // peckish only ever shows up here, on a button the cursor already found
+    treatBtn.classList.toggle('peckish', isPeckish());
+    btnsEl.hidden = false;
+    placeCenteredOnBuddy(btnsEl);
     reportBounds();
   }
 
   function scheduleHideNewBtn() {
     clearTimeout(btnHideTimer);
-    // generous grace: an overshoot past the button and back must never
-    // kill it mid-aim
-    btnHideTimer = setTimeout(() => {
-      btnEl.hidden = true;
-      reportBounds();
-    }, 1200);
+    // generous grace: an overshoot past the buttons and back must never
+    // kill them mid-aim
+    btnHideTimer = setTimeout(() => hideBtns(), 1200);
+  }
+
+  function hideBtns() {
+    clearTimeout(btnHideTimer);
+    btnHideTimer = null;
+    if (btnsEl.hidden) return;
+    btnsEl.hidden = true;
+    reportBounds();
   }
 
   // Showing: genuine sprite hover. Hiding on the DESKTOP: only the Rust
@@ -337,19 +381,19 @@
     else if (!IS_TAURI) scheduleHideNewBtn();
   });
   canvas.addEventListener('mouseleave', () => { if (!IS_TAURI) scheduleHideNewBtn(); });
-  btnEl.addEventListener('mouseenter', () => { clearTimeout(btnHideTimer); btnHideTimer = null; });
-  btnEl.addEventListener('mouseleave', () => { if (!IS_TAURI) scheduleHideNewBtn(); });
+  btnsEl.addEventListener('mouseenter', () => { clearTimeout(btnHideTimer); btnHideTimer = null; });
+  btnsEl.addEventListener('mouseleave', () => { if (!IS_TAURI) scheduleHideNewBtn(); });
   btnEl.addEventListener('click', () => {
     if (IS_TAURI) invoke('open_new_code_session');
-    // visible confirmation: a terracotta pulse, then the button retires
+    // visible confirmation: a terracotta pulse, then the pair retires
     // (no wave — the user prefers the pet not to react to new sessions)
     btnEl.classList.add('clicked');
     setTimeout(() => {
       btnEl.classList.remove('clicked');
-      btnEl.hidden = true;
-      reportBounds();
+      hideBtns();
     }, 600);
   });
+  treatBtn.addEventListener('click', () => feed());
 
   // --- session popover: click the buddy to toggle a live list of every
   //     Claude session the pipeline knows about ---
@@ -450,6 +494,8 @@
     const p = lastPipeline;
     const drift = lastPipelineAt ? Date.now() - lastPipelineAt : 0;
     popSessions.textContent = '';
+    // quiet standing line; a static node, so it never loses a click
+    popTreats.textContent = treatLine();
     if (!p) {
       popCount.textContent = IS_TAURI ? 'waiting for session data…' : 'browser demo — no pipeline';
       popBlind.hidden = true;
@@ -539,7 +585,7 @@
   function setPopover(open) {
     if (popEl.hidden === !open) return;
     popEl.hidden = !open;
-    if (open) { positionPopover(); renderPopover(); btnEl.hidden = true; }
+    if (open) { positionPopover(); renderPopover(); btnsEl.hidden = true; }
     else { themeRow.hidden = true; artRow.hidden = true; } // reopening always starts on the session list
     updateBubble();
     reportBounds();
@@ -605,7 +651,7 @@
     const show = p && (p.state === 'needs_input' || p.state === 'error') && popEl.hidden;
     bubEl.hidden = !show;
     if (!show) return;
-    btnEl.hidden = true; // the bubble owns the spot below the buddy
+    btnsEl.hidden = true; // the bubble owns the spot below the buddy
     // the top session (same priority sort as the popover) names the project
     const rows = [...p.sessions].sort((a, b) =>
       (POP_RANK[b.state] || 0) - (POP_RANK[a.state] || 0) || a.since_ms - b.since_ms);
@@ -712,7 +758,7 @@
   // merely focused the window and did nothing. Panels sit inside the same
   // ring and keep their own clicks.
   function onBuddy(e) {
-    if (e.target && e.target.closest && e.target.closest('#popover, #bubble, #newbtn, #debug')) return false;
+    if (e.target && e.target.closest && e.target.closest('#popover, #bubble, #petbtns, #debug')) return false;
     const rect = canvas.getBoundingClientRect();
     const b = pet.opaqueBounds();
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
@@ -792,6 +838,94 @@
     try { setState(p.state, p.detail); } catch (err) { console.error('bad pet-state', p, err); }
   }
 
+  // --- treats: the second round button feeds him. The treat falls in at
+  //     his side, he plays the LOCAL `eating` clip (the reducer never emits
+  //     it), and the host hands him back to pipeline truth when the meal is
+  //     over — the same handoff the boot wave uses. ---
+  const popTreats = document.getElementById('pop-treats');
+  const treatLayer = new TreatSprite(pet, wrap);
+
+  const PECKISH_MS = 3 * 60 * 60 * 1000; // a few hours make him peckish
+  const BITE_MS = 333;      // into the eating clip: where the first munch lands
+  const MEAL_MS = 1334;     // intro (800) + one loop cycle (534)
+  const STRANDED_MS = 3000; // grace before a meal that never started gives up
+
+  let feeding = false;
+
+  // localStorage wrapped like every other read here; a cleared or garbled
+  // store reads as zero treats, never NaN
+  let treats = { count: 0, lastFedAt: 0 };
+  try {
+    const raw = localStorage.getItem('treats');
+    if (raw) {
+      const t = JSON.parse(raw) || {};
+      treats = { count: Number(t.count) || 0, lastFedAt: Number(t.lastFedAt) || 0 };
+    }
+  } catch {}
+
+  function treatLine() {
+    if (!treats.count) return 'treats: 0';
+    return 'treats: ' + treats.count
+      + (treats.lastFedAt ? ' · last ' + fmtAge(Date.now() - treats.lastFedAt) + ' ago' : '');
+  }
+  // never fed counts as peckish: the pulse is the only hint the button feeds
+  // him, and it is only ever seen on a button the cursor has already found
+  function isPeckish() { return Date.now() - treats.lastFedAt > PECKISH_MS; }
+
+  // an outro's real length, read from the clip table instead of guessed, so
+  // both skins (and any retiming) stay in step
+  function outroMs(name) {
+    const c = pet.style.clips[name];
+    return c && c.stages ? c.stages.outro.reduce((a, s) => a + s.ms, 0) : 0;
+  }
+
+  function feed() {
+    if (feeding) return;
+    feeding = true;
+    // never drop a treat on a sleeping crab: wake him first and let the
+    // whole rise / stretch / settle outro finish before the snack arrives
+    const waking = pet.state === 'sleeping';
+    if (waking) setState('idle');
+    hideBtns();
+    setTimeout(() => {
+      treatLayer.drop();
+      // the clip starts as the treat lands. If another clip's outro is still
+      // running, pet.js holds the request and the biscuit simply waits on
+      // the ground until he is free (the state listener below picks it up).
+      setTimeout(() => setState('eating'), FALL_MS);
+      setTimeout(() => {
+        if (feeding && pet.state !== 'eating') { treatLayer.clear(); feeding = false; }
+      }, FALL_MS + STRANDED_MS);
+    }, waking ? outroMs('sleeping') : 0);
+  }
+
+  // The meal's beats hang off the clip actually STARTING, not off the
+  // request: setState() may be holding it behind another clip's outro, and
+  // the bite has to land on the bite.
+  pet.on('state', ({ state }) => {
+    if (state !== 'eating') return;
+    setTimeout(() => {
+      treatLayer.clear();                 // taken in one bite
+      if (pet.state !== 'eating') return; // cut short: nothing was eaten
+      treats = { count: treats.count + 1, lastFedAt: Date.now() };
+      try { localStorage.setItem('treats', JSON.stringify(treats)); } catch {}
+      treatBtn.classList.remove('peckish');
+      renderPopover();                    // no-op while hidden
+    }, BITE_MS);
+    setTimeout(endMeal, MEAL_MS);
+  });
+
+  // Back to pipeline truth, exactly as the boot wave hands off. An attention
+  // state that arrived mid-munch is already queued behind the clip's outro
+  // (pet.js _outro.pending), so nothing here handles interruption itself.
+  function endMeal() {
+    feeding = false;
+    if (pet.state !== 'eating') return; // something else took over
+    if (!IS_TAURI) { setState('idle'); return; }
+    if (lastPipeline) applyPipeline(lastPipeline);
+    else setState('idle');
+  }
+
   // greet the fresh app launch with a smiling wave, then settle into truth:
   // the reducer's state in Tauri (sleeping until events say otherwise), the
   // idle demo in the browser. 1875ms lands mid-way through the 4th cycle's
@@ -854,7 +988,7 @@
   }
 
   // debug/test handle
-  window.__clawdbot = { pet, setState, setStyle: setArtStyle, setPopover, renderPopover, get lastPipeline() { return lastPipeline; } };
+  window.__clawdbot = { pet, setState, setStyle: setArtStyle, setPopover, renderPopover, feed, treatLayer, get treats() { return treats; }, get lastPipeline() { return lastPipeline; } };
 </script>
 </body>
 </html>

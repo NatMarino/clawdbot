@@ -148,6 +148,15 @@ const HOP_SQUASH  = archEyes(dbl(stamp(BODIES.squash, null)), 8, [6, 16]);
 const HOP_ARMSUP  = archEyes(dbl(stamp(BODIES.bounceUp, null)), 4, [6, 16]);
 const WAVE_UP     = archEyes(dbl(stamp(BODIES.waveUp, null)), 4, [6, 16]);
 
+// --- eating: the treat interaction. Composed strictly from the approved
+// pose vocabulary (no new body art): a glance at the snack, a lean down onto
+// it, munching with the eyes squeezed happily shut on each bite, then the
+// both-arms-up delight before settling. squash dy 2 puts the face at base
+// row 4 -> doubled rows 8-9, the same eye line SLEEP_CLOSED uses. ---
+const EAT_SPOT = IDLE_SIDE;                                // spots it, glances over
+const EAT_DOWN = dbl(stamp(BODIES.squash, FACES.normal));  // leaned in, eyes open
+const EAT_BITE = HOP_SQUASH;                               // mid-bite happy squint
+
 // --- working: measured from the user's definitive mirrored GIF
 // (spikes/reference-material/working-mirrored.gif, 222x162, 47 frames
 // @60-70ms, cell ~5.9px). res 2 half-cell frames, 26 cols x 24 rows,
@@ -1210,6 +1219,32 @@ const CLIPS = {
         { frame: HOP_NORMAL, dx: 0, dy: 0, ms: 250 },
       ],
       outro: [{ frame: HOP_NORMAL, dx: 0, dy: 0, ms: 267 }],
+    },
+  },
+  // A treat landed: spot it, lean down, three quick munches, then bounce
+  // with both arms up. LOCAL state only — the reducer never emits it; the
+  // host plays it and hands the pet back to pipeline truth when it ends.
+  // Staged so the munch can never be cut off mid-chew: an attention state
+  // arriving during the meal still waits for the outro's settle beat.
+  // Intro totals 800ms, and the first bite starts at 333ms — the treat
+  // sprite is removed on that beat (see treats.js / the host's feed()).
+  eating: {
+    palette: 'normal', overlay: null, motion: 'none', res: 2,
+    stages: {
+      intro: [
+        { frame: EAT_SPOT, dx: 0, dy: 0, ms: 200 },
+        { frame: EAT_DOWN, dx: 0, dy: 0, ms: 133 },
+        { frame: EAT_BITE, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_DOWN, dx: 0, dy: 0, ms: 67 },
+        { frame: EAT_BITE, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_DOWN, dx: 0, dy: 0, ms: 67 },
+        { frame: EAT_BITE, dx: 0, dy: 0, ms: 133 },
+      ],
+      loop: [
+        { frame: HOP_ARMSUP, dx: 0, dy: 0, ms: 267 },
+        { frame: HOP_NORMAL, dx: 0, dy: 0, ms: 267 },
+      ],
+      outro: [{ frame: HOP_NORMAL, dx: 0, dy: 0, ms: 200 }],
     },
   },
 };

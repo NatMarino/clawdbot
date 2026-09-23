@@ -120,6 +120,9 @@ const HOP_NORMAL  = rows(eyesArch(body()));
 const HOP_SQUASH  = rows(eyesArch(body({ sink: 8, legH: 0 }), { sink: 8 }));
 const HOP_ARMSUP  = rows(eyesArch(body({ nubs: 'none', bars: ['L', 'R'] })));
 const WAVE_UP     = rows(eyesArch(body({ nubs: 'left', bars: ['R'] })));
+// eating pose: leaned down onto the treat with the eyes open. The bite is
+// HOP_SQUASH (tucked, happy squint), same as the app skin.
+const EAT_DOWN = rows(eyesOpen(body({ sink: 8, legH: 0 }), { sink: 8 }));
 
 // --- working, home frames: the wind-up dance and the landing, drawn on the
 // CLI body from the app's measured poses (sprites.js WORK_*). Arm blocks
@@ -408,6 +411,27 @@ const CLIPS_CLI = {
         { frame: HOP_NORMAL, dx: 0, dy: 0, ms: 250 },
       ],
       outro: [{ frame: HOP_NORMAL, dx: 0, dy: 0, ms: 267 }],
+    },
+  },
+  // the app skin's eating choreography on this body (see sprites.js): spot
+  // the treat, lean down, three munches, then the both-arms-up delight.
+  eating: {
+    palette: 'cli', overlay: null, motion: 'none',
+    stages: {
+      intro: [
+        { frame: IDLE_SIDE,  dx: 0, dy: 0, ms: 200 },
+        { frame: EAT_DOWN,   dx: 0, dy: 0, ms: 133 },
+        { frame: HOP_SQUASH, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_DOWN,   dx: 0, dy: 0, ms: 67 },
+        { frame: HOP_SQUASH, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_DOWN,   dx: 0, dy: 0, ms: 67 },
+        { frame: HOP_SQUASH, dx: 0, dy: 0, ms: 133 },
+      ],
+      loop: [
+        { frame: HOP_ARMSUP, dx: 0, dy: 0, ms: 267 },
+        { frame: HOP_NORMAL, dx: 0, dy: 0, ms: 267 },
+      ],
+      outro: [{ frame: HOP_NORMAL, dx: 0, dy: 0, ms: 200 }],
     },
   },
 };
