@@ -40,8 +40,63 @@ const MOTIONS = {
 // ~3.2Hz is a shade under syllable rate: enough to read as speech, slow
 // enough not to look like a vibration. Bottom-anchored frames mean the +1
 // half of the cycle sinks his feet a touch, which reads as a squash.
-const TALK_HZ = 3.2;
-const talkBob = (secs) => Math.round(Math.sin(secs * TALK_HZ * Math.PI * 2));
+// Talk rhythm, transcribed frame-for-frame from the reference sheet
+// (sprites/v2/clawd-talk, 48 frames at 10fps). It is not a curve: the
+// reference toggles between exactly two heights on an irregular 1-4 frame
+// beat, which is what makes it read as speech rather than as breathing. A
+// sine here looked mechanical by comparison.
+const TALK_PATTERN = [
+  1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1,
+  1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1,
+  0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0,
+];
+const TALK_STEP_MS = 100;
+// The reference squashes 12px of an 84px standing height. Kept as a FRACTION
+// rather than a row count so it lands the same on the app skin's 20-row
+// doubled frames, its res-1 frames, and the cli skin's 52-row grid.
+const TALK_SQUASH = 12 / 84;
+const talkSquash = (secs) =>
+  TALK_PATTERN[Math.floor(secs * 1000 / TALK_STEP_MS) % TALK_PATTERN.length] ? TALK_SQUASH : 0;
+
+// Squash the BODY by `frac` of its own height while the feet stay exactly
+// where they are. An offset on the whole sprite (what this used to be) makes
+// him hover; what reads as a soft body is the silhouette getting shorter
+// above planted legs. A fraction rather than a row count so the same call
+// lands proportionally on a 20-row doubled frame and a 52-row cli one.
+//
+// Finding the legs: they are the bottom run of rows with a gap INSIDE the
+// art — the leg comb — as opposed to the solid rows of the body. Poses with
+// the legs tucked under (eating, sleeping) have no such run, and then the
+// whole art compresses onto its own bottom edge, which is the same idea.
+const squashCache = new WeakMap();
+function squashFrame(frame, frac) {
+  if (frac <= 0) return frame;
+  let per = squashCache.get(frame);
+  if (!per) { per = new Map(); squashCache.set(frame, per); }
+  const hit = per.get(frac);
+  if (hit) return hit;
+
+  const art = frame.map((r) => r.search(/[^.]/));
+  const top = art.findIndex((a) => a >= 0);
+  let bottom = -1;
+  for (let i = frame.length - 1; i >= 0; i--) if (art[i] >= 0) { bottom = i; break; }
+  let out = frame;
+  const n = Math.max(1, Math.round((bottom - top + 1) * frac));
+  if (top >= 0 && bottom > top) {
+    const gappy = frame.map((r, i) => {
+      if (art[i] < 0) return false;
+      const end = r.length - 1 - [...r].reverse().findIndex((ch) => ch !== '.');
+      return r.slice(art[i], end + 1).includes('.');
+    });
+    let legTop = bottom + 1;
+    if (gappy[bottom]) { let i = bottom; while (i > top && gappy[i - 1]) i--; legTop = i; }
+    const blank = '.'.repeat(frame[0].length);
+    out = frame.slice();
+    for (let r = legTop - 1; r >= top; r--) out[r] = (r - n >= top) ? frame[r - n] : blank;
+  }
+  per.set(frac, out);
+  return out;
+}
 
 // Squint: a happy little scrunch while he chirps. Done as a transform on
 // whatever frame is already on screen rather than as squinting copies of
@@ -327,13 +382,14 @@ export class Pet {
       this._glitch.nextAt = 0;
     }
 
-    const frame = this.squint ? squintFrame(cur.frame) : cur.frame;
+    let frame = this.squint ? squintFrame(cur.frame) : cur.frame;
+    if (this.speaking) {
+      frame = squashFrame(frame, talkSquash((performance.now() - this._speakSince) / 1000));
+    }
     const palette = PALETTES[glitch && glitch.grey ? 'grey' : cur.palette];
 
     const m = (MOTIONS[cur.motion] || MOTIONS.none)(t);
-    const dx = m.dx + cur.fdx;
-    let dy = m.dy + cur.fdy;
-    if (this.speaking) dy += talkBob((performance.now() - this._speakSince) / 1000);
+    const dx = m.dx + cur.fdx, dy = m.dy + cur.fdy;
 
     // cell size shrinks with frame resolution (the app's staged clips use
     // res 2 = half-cell art at 4 units per cell). The sprite is anchored by
