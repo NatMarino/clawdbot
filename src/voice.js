@@ -57,6 +57,16 @@ const TOOL_VERB = {
   WebFetch: 'fetch', Glob: 'look for', Grep: 'search for',
 };
 
+// Some tools carry no scrap at all, because nothing in their input is a
+// human-readable line: AskUserQuestion's input is an array of questions, so
+// the reducer falls back to the bare tool name and he announces
+// "ask user question". These are the ones worth a sentence of their own;
+// anything else with no scrap drops to the canned line for its kind.
+const TOOL_ASK = {
+  AskUserQuestion: '{name} has a question for you.',
+  ExitPlanMode: '{name} wants to get started.',
+};
+
 // Cooldown, bucketed by STATE rather than by kind. The reducer can flap while
 // a session list settles — and it flaps the *kind* too (idle_prompt ->
 // permission -> elicitation on one session), so a per-kind cooldown lets the
@@ -178,6 +188,9 @@ function pick(arr, bucket) {
 function phraseAsk(detail) {
   const raw = String(detail || '').trim();
   if (!raw) return '';
+  // A bare identifier is a tool name with nothing behind it, not a summary of
+  // anything — spoken, "AskUserQuestion" comes out as "ask user question".
+  if (/^[A-Za-z][A-Za-z0-9_]*$/.test(raw)) return TOOL_ASK[raw] || '';
   const m = raw.match(/^([A-Z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*):\s*(.+)$/);
   if (m) {
     const tool = m[1];
@@ -207,7 +220,8 @@ function lineFor(state, kind, name, detail, forceGreeting) {
   const body = settings.speakDetail ? phraseAsk(detail) : '';
   // the detail, when there is one, IS the ask — the canned line is only the
   // fallback for a payload that carries nothing useful
-  const ask = body || pick(ASKS[key], 'ask:' + key).replace(/\{name\}/g, who);
+  // {name} is substituted on BOTH paths: a TOOL_ASK line carries it too
+  const ask = (body || pick(ASKS[key], 'ask:' + key)).replace(/\{name\}/g, who);
   const greet = (forceGreeting || Math.random() < GREET_CHANCE) ? pick(GREETINGS, 'greet') + ' ' : '';
   return greet + ask;
 }
