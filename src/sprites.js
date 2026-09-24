@@ -15,7 +15,7 @@
 // sprites-cli.js; the clips here are unchanged by that split.
 'use strict';
 
-import { PALETTES, GLYPHS, stamp, dbl, slitEyes, archEyes, sadEyes, tear, mirrorPose, validateClips } from './sprite-kit.js';
+import { PALETTES, GLYPHS, stamp, dbl, slitEyes, archEyes, sadEyes, tear, mirrorPose, block, validateClips } from './sprite-kit.js';
 
 // --- bodies: 12 wide x 10 tall (rows 0 & 9 are motion headroom).
 // Normal pose: body rows 1-6, arm band rows 3-4, legs rows 7-8.
@@ -147,6 +147,28 @@ const HOP_NORMAL  = archEyes(dbl(stamp(BODIES.normal, null)), 4, [6, 16]);
 const HOP_SQUASH  = archEyes(dbl(stamp(BODIES.squash, null)), 8, [6, 16]);
 const HOP_ARMSUP  = archEyes(dbl(stamp(BODIES.bounceUp, null)), 4, [6, 16]);
 const WAVE_UP     = archEyes(dbl(stamp(BODIES.waveUp, null)), 4, [6, 16]);
+
+// --- eating: the treat interaction.
+//
+// The buddy is all eyes everywhere else, and the first cut of this clip used
+// the happy ∩-squint as the chew — which read as his EYES doing the chomping.
+// So eating is the one clip with a MOUTH, and nothing else grows one.
+//
+// Making room for it: the squashed head block is only doubled rows 6-9, and
+// eyes at the usual line fill 8-9 with nothing underneath. FACES.up lifts
+// them a whole cell (base row 3 -> doubled 6-7), which frees 8-9 for the
+// mouth and incidentally reads right — he is hunched over the treat looking
+// up while he chews. ---
+// Making room for it: the squashed head block is doubled rows 6-9 and eyes
+// on the usual cell line fill 8-9, leaving nothing underneath. Dropping the
+// eyes half a cell to rows 7-8 keeps a body row above them (his normal face)
+// and frees row 9 down as the mouth line. The mouth crosses onto the arm
+// band, which is contiguous body pixels, so the face just reads as lower. ---
+const EAT_SPOT = IDLE_SIDE;                                        // spots it, glances over
+const EAT_BARE = dbl(stamp(BODIES.squash, null));                  // leaned in, no face yet
+const EAT_FACE = block(block(EAT_BARE, 7, 6, 2, 2), 7, 16, 2, 2);  // eyes, half a cell down
+const EAT_DOWN = block(EAT_FACE, 11, 10, 4, 1);                    // lips together
+const EAT_BITE = block(EAT_FACE, 10,  9, 6, 2);                    // mouth open, chomping
 
 // --- working: measured from the user's definitive mirrored GIF
 // (spikes/reference-material/working-mirrored.gif, 222x162, 47 frames
@@ -1210,6 +1232,32 @@ const CLIPS = {
         { frame: HOP_NORMAL, dx: 0, dy: 0, ms: 250 },
       ],
       outro: [{ frame: HOP_NORMAL, dx: 0, dy: 0, ms: 267 }],
+    },
+  },
+  // A treat landed: spot it, lean down, three quick munches, then bounce
+  // with both arms up. LOCAL state only — the reducer never emits it; the
+  // host plays it and hands the pet back to pipeline truth when it ends.
+  // Staged so the munch can never be cut off mid-chew: an attention state
+  // arriving during the meal still waits for the outro's settle beat.
+  // Intro totals 800ms, and the first bite starts at 333ms — the treat
+  // sprite is removed on that beat (see treats.js / the host's feed()).
+  eating: {
+    palette: 'normal', overlay: null, motion: 'none', res: 2,
+    stages: {
+      intro: [
+        { frame: EAT_SPOT, dx: 0, dy: 0, ms: 200 },
+        { frame: EAT_DOWN, dx: 0, dy: 0, ms: 133 },
+        { frame: EAT_BITE, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_DOWN, dx: 0, dy: 0, ms: 67 },
+        { frame: EAT_BITE, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_DOWN, dx: 0, dy: 0, ms: 67 },
+        { frame: EAT_BITE, dx: 0, dy: 0, ms: 133 },
+      ],
+      loop: [
+        { frame: HOP_ARMSUP, dx: 0, dy: 0, ms: 267 },
+        { frame: HOP_NORMAL, dx: 0, dy: 0, ms: 267 },
+      ],
+      outro: [{ frame: HOP_NORMAL, dx: 0, dy: 0, ms: 200 }],
     },
   },
 };

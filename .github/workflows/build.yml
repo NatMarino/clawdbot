@@ -1,0 +1,39 @@
+﻿# Builds the Windows pet executable.
+#
+# Why CI rather than a local build: Smart App Control on the maintainer's
+# machine blocks rustc from loading locally-compiled proc-macro DLLs (Code
+# Integrity 3077), so `cargo build` cannot complete there. A GitHub runner has
+# no such policy, and an exe that arrives as a download runs fine.
+#
+# No Node, no tauri-cli, no NSIS: tauri.conf.json sets frontendDist to ../src
+# and the `custom-protocol` feature embeds that folder into the binary, so the
+# bare exe is self-contained.
+name: build
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # keeps the ~400-crate dependency tree warm between runs
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Build release exe
+        working-directory: src-tauri
+        run: cargo build --release --features custom-protocol
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clawdbot-exe
+          path: src-tauri/target/release/clawdbot.exe
+          if-no-files-found: error

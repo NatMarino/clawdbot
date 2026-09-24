@@ -33,6 +33,109 @@ const MOTIONS = {
   hopOnce: (t) => ({ dx: 0, dy: t < 0.55 ? -Math.round(Math.sin((t / 0.55) * Math.PI) * 8) : 0 }),
 };
 
+// Talking: a small vertical bob added ON TOP of whatever the clip is already
+// doing, for as long as an utterance is playing. It is not a clip of its own
+// because he talks *while* hopping for input or drooping over an error — the
+// point is to tie the voice to the body, so you can tell the sound is him.
+// ~3.2Hz is a shade under syllable rate: enough to read as speech, slow
+// enough not to look like a vibration. Bottom-anchored frames mean the +1
+// half of the cycle sinks his feet a touch, which reads as a squash.
+// Talk rhythm, transcribed frame-for-frame from the reference sheet
+// (sprites/v2/clawd-talk, 48 frames at 10fps). It is not a curve: the
+// reference toggles between exactly two heights on an irregular 1-4 frame
+// beat, which is what makes it read as speech rather than as breathing. A
+// sine here looked mechanical by comparison.
+const TALK_PATTERN = [
+  1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1,
+  1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1,
+  0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0,
+];
+const TALK_STEP_MS = 100;
+// The reference squashes 12px of an 84px standing height. Kept as a FRACTION
+// rather than a row count so it lands the same on the app skin's 20-row
+// doubled frames, its res-1 frames, and the cli skin's 52-row grid.
+const TALK_SQUASH = 12 / 84;
+const talkSquash = (secs) =>
+  TALK_PATTERN[Math.floor(secs * 1000 / TALK_STEP_MS) % TALK_PATTERN.length] ? TALK_SQUASH : 0;
+
+// Squash the BODY by `frac` of its own height while the feet stay exactly
+// where they are. An offset on the whole sprite (what this used to be) makes
+// him hover; what reads as a soft body is the silhouette getting shorter
+// above planted legs. A fraction rather than a row count so the same call
+// lands proportionally on a 20-row doubled frame and a 52-row cli one.
+//
+// Finding the legs: they are the bottom run of rows with a gap INSIDE the
+// art — the leg comb — as opposed to the solid rows of the body. Poses with
+// the legs tucked under (eating, sleeping) have no such run, and then the
+// whole art compresses onto its own bottom edge, which is the same idea.
+const squashCache = new WeakMap();
+function squashFrame(frame, frac) {
+  if (frac <= 0) return frame;
+  let per = squashCache.get(frame);
+  if (!per) { per = new Map(); squashCache.set(frame, per); }
+  const hit = per.get(frac);
+  if (hit) return hit;
+
+  const art = frame.map((r) => r.search(/[^.]/));
+  const top = art.findIndex((a) => a >= 0);
+  let bottom = -1;
+  for (let i = frame.length - 1; i >= 0; i--) if (art[i] >= 0) { bottom = i; break; }
+  let out = frame;
+  const n = Math.max(1, Math.round((bottom - top + 1) * frac));
+  if (top >= 0 && bottom > top) {
+    const gappy = frame.map((r, i) => {
+      if (art[i] < 0) return false;
+      const end = r.length - 1 - [...r].reverse().findIndex((ch) => ch !== '.');
+      return r.slice(art[i], end + 1).includes('.');
+    });
+    let legTop = bottom + 1;
+    if (gappy[bottom]) { let i = bottom; while (i > top && gappy[i - 1]) i--; legTop = i; }
+    const blank = '.'.repeat(frame[0].length);
+    out = frame.slice();
+    for (let r = legTop - 1; r >= top; r--) out[r] = (r - n >= top) ? frame[r - n] : blank;
+  }
+  per.set(frac, out);
+  return out;
+}
+
+// Squint: a happy little scrunch while he chirps. Done as a transform on
+// whatever frame is already on screen rather than as squinting copies of
+// every pose, because the chirp can land on any of them.
+//
+// It collapses the TOPMOST run of eye rows down to a thin line and leaves
+// everything below it alone — which is what keeps the eating clip's mouth
+// open. The mouth is drawn with the same 'E' as the eyes, so a naive
+// "shrink every E" would clamp his mouth shut mid-bite. Eyes are always the
+// highest E on the body, so taking only the first run is enough.
+// Two rules find the eyes among everything else drawn with 'E':
+//   - skip any run mixed with 'w'. The done clip's checkered flag is cloth
+//     woven from E and w, and it sits ABOVE his head, so "topmost E" alone
+//     picks the flag and shreds it.
+//   - only squint a run whose rows are IDENTICAL, i.e. fully open eyes. An
+//     arch or a sad ∪ is already an expression; flattening one deletes the
+//     shape rather than scrunching it, and those poses are squinting anyway.
+const squintCache = new WeakMap();
+function squintFrame(frame) {
+  const hit = squintCache.get(frame);
+  if (hit) return hit;
+  let out = frame;
+  for (let i = 0; i < frame.length; i++) {
+    if (!frame[i].includes('E')) continue;
+    let end = i;
+    while (end + 1 < frame.length && frame[end + 1].includes('E')) end++;
+    const run = frame.slice(i, end + 1);
+    const h = run.length;
+    if (h >= 2 && !run.some((r) => r.includes('w')) && run.every((r) => r === run[0])) {
+      const keepFrom = end - Math.max(0, Math.ceil(h / 3) - 1); // keep the bottom third
+      out = frame.map((row, r) => (r >= i && r < keepFrom ? row.replace(/E/g, '#') : row));
+      break; // the first qualifying run is the eyes; anything lower is a mouth
+    }
+    i = end;
+  }
+  squintCache.set(frame, out);
+  return out;
+}
+
 // Idle nap cadence: after a random 3-8 min of uninterrupted idle the buddy
 // falls asleep; the nap ends on its own after 45s-2min. A click or drag
 // wakes it early. Deliberately much rarer than the old soccer interlude.
@@ -52,6 +155,9 @@ export class Pet {
     this._sleepTimer = null;
     this._wakeTimer = null;
     this._napMs = 0;
+    this.speaking = false;   // an utterance is playing: bob while it does
+    this._speakSince = 0;
+    this.squint = false;     // chirping: scrunch the eyes while it sounds
     this._armSleep(); // initial state is idle
     // error-state glitch: random tear-into-bands moments (see _raf)
     this._glitch = { nextAt: 0, until: 0, bands: [0, 0, 0], grey: false };
@@ -99,6 +205,19 @@ export class Pet {
     if (!next.clips[this.state]) this._apply('idle', null);
     this._emit('style', name);
   }
+
+  // Host tells the engine when he is actually making a noise. Restarting the
+  // clock on each utterance keeps the bob starting from rest rather than
+  // picking up mid-cycle.
+  setSpeaking(on) {
+    if (!!on === this.speaking) return;
+    this.speaking = !!on;
+    this._speakSince = performance.now();
+  }
+
+  // Only the chirp squints — a spoken sentence keeps whatever face the state
+  // called for, since he is being looked at while he asks for something.
+  setSquint(on) { this.squint = !!on; }
 
   setState(state, detail = null) {
     if (!this.style.clips[state]) {
@@ -263,7 +382,10 @@ export class Pet {
       this._glitch.nextAt = 0;
     }
 
-    const frame = cur.frame;
+    let frame = this.squint ? squintFrame(cur.frame) : cur.frame;
+    if (this.speaking) {
+      frame = squashFrame(frame, talkSquash((performance.now() - this._speakSince) / 1000));
+    }
     const palette = PALETTES[glitch && glitch.grey ? 'grey' : cur.palette];
 
     const m = (MOTIONS[cur.motion] || MOTIONS.none)(t);
