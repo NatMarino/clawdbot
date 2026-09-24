@@ -105,6 +105,9 @@
   body.panels-light #popover .fbtn:hover { background: #d8cfc4; color: #3b3630; }
   body.panels-light #popover .sess.quiet .fbtn { background: #efdccf; border-color: #d3b49f; }
   /* the rule list: the only way back from `ignore`, whose rows are gone */
+  /* the muted ask: a mark, not a message */
+  #bubble.ask { padding: 4px 10px; min-width: 0; }
+  #bubble .b-q { font-size: 19px; font-weight: 700; line-height: 1.1; text-align: center; opacity: .85; }
   #popover .frule { display: inline-flex; align-items: center; gap: 4px; }
   #popover .frule .x { opacity: .6; font-weight: 700; }
   #popover .frule:hover .x { opacity: 1; }
@@ -670,6 +673,22 @@
     return hit ? f[hit] : '';
   }
 
+  // The primary control. A mute is about THIS chat: it lives in the pet's
+  // memory only, dies when the session leaves the registry, and does not
+  // follow a chat that changed hands and had its context cleared (that is a
+  // new session id). `setFilter` below is the other, longer-lived rule type.
+  function setSessionMute(id, mode) {
+    if (!id) return;
+    if (IS_TAURI) invoke('set_session_mute', { id, mode });
+    if (lastPipeline) {
+      let rows = lastPipeline.sessions.map((s) => (s.id === id ? { ...s, filtered: mode === 'quiet' ? 'quiet' : '' } : s));
+      if (mode === 'ignore') rows = rows.filter((s) => s.id !== id);
+      lastPipeline = { ...lastPipeline, sessions: rows, n_sessions: rows.length };
+    }
+    renderPopover();
+    reportBounds();
+  }
+
   function setFilter(name, mode) {
     if (!name) return;
     if (IS_TAURI) invoke('set_session_filter', { name, mode });
@@ -802,13 +821,17 @@
       top.append(st, age);
       // the attention control: cycles care -> quiet -> hidden. It must not
       // also open the session, hence the stopPropagation.
-      const name = rowName(s);
-      const mode = s.filtered || filterOf(name);
+      const mode = s.filtered || '';
       const fb = document.createElement('button');
       fb.className = 'fbtn';
       fb.textContent = mode === 'quiet' ? 'muted' : 'mute';
-      fb.title = FILTER_DOES[mode] || FILTER_DOES[''];
-      fb.onclick = (e) => { e.stopPropagation(); setFilter(name, FILTER_NEXT[mode] ?? 'quiet'); };
+      // A project rule may be what muted this row. Clicking still works —
+      // a chat-level mute outranks the rule, so this is how you single one
+      // chat back out of a muted project — but say where the rule lives.
+      const byRule = !!filterOf(rowName(s));
+      fb.title = (FILTER_DOES[mode] || FILTER_DOES[''])
+        + (byRule ? ' (this project also has a rule, under the gear)' : '');
+      fb.onclick = (e) => { e.stopPropagation(); setSessionMute(s.id, FILTER_NEXT[mode] ?? 'quiet'); };
       top.appendChild(fb);
       row.appendChild(top);
       if (s.detail) {
@@ -879,6 +902,15 @@
   // is its first granted folder name)
   // the session that names an alert: highest priority, oldest first — the
   // same sort the popover lists by, so the bubble and the voice always agree
+  // A muted chat that needs input. Quiet means he does not wear its state and
+  // does not speak its ask — but silence would make muting indistinguishable
+  // from not noticing, so it still gets the smallest possible signal: a `?`
+  // over his head and one rising chirp.
+  function quietAsk(p) {
+    if (!p || !p.sessions) return null;
+    return p.sessions.find((s) => s.filtered === 'quiet' && s.state === 'needs_input') || null;
+  }
+
   function topSession(p) {
     if (!p || !p.sessions || !p.sessions.length) return null;
     return [...p.sessions].sort((a, b) =>
@@ -924,10 +956,35 @@
 
   function updateBubble() {
     const p = lastPipeline;
-    const show = p && (p.state === 'needs_input' || p.state === 'error') && popEl.hidden;
+    const loud = !!p && (p.state === 'needs_input' || p.state === 'error');
+    // the loud ask wins the spot; the quiet one only gets it when he is not
+    // already wearing a real alert
+    const qa = loud ? null : quietAsk(p);
+    const show = !!p && (loud || !!qa) && popEl.hidden;
     bubEl.hidden = !show;
     if (!show) return;
     btnsEl.hidden = true; // the bubble owns the spot below the buddy
+    bubEl.classList.toggle('ask', !!qa);
+    if (qa) {
+      // deliberately just the mark: naming the project here would be the
+      // notification she muted, reintroduced one size smaller
+      bubEl.dataset.link = sessionLink(qa);
+      bubEl.classList.remove('err');
+      bubEl.textContent = '';
+      const q = document.createElement('div');
+      q.className = 'b-q';
+      q.textContent = '?';
+      q.title = rowName(qa) + ' is asking (muted)';
+      bubEl.appendChild(q);
+      const qt = document.createElement('div');
+      qt.className = 'b-tail';
+      bubEl.appendChild(qt);
+      bubEl.style.top = 'auto';
+      bubEl.style.bottom = aboveBuddyBottomCss(10);
+      bubEl.style.maxWidth = '';
+      placeCenteredOnBuddy(bubEl);
+      return;
+    }
     const top = topSession(p);
     bubEl.dataset.link = top ? sessionLink(top) : '';
     bubEl.classList.toggle('err', p.state === 'error');
@@ -1124,6 +1181,12 @@
       voice.alert({ state: p.state, kind: p.kind, name, detail: p.detail });
       return;
     }
+    // a muted chat started asking: the question sound, nothing else. Compared
+    // on the session id so a second muted chat asking is its own event, while
+    // the same one still asking is not.
+    const qa = quietAsk(p);
+    const qaWas = quietAsk(prev);
+    if (qa && (!qaWas || qaWas.id !== qa.id)) voice.asked();
     // finishing a turn: a chirp, or a sentence if the job actually took a
     // while. Only when he was genuinely busy first — a done arriving from
     // idle is bookkeeping, not an accomplishment.

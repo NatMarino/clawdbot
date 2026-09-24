@@ -127,7 +127,17 @@ fn norm_path(p: &str) -> String {
 /// Which rule applies to a session. Two keys are accepted: the displayed
 /// row name (what the popover writes) and a full path (an escape hatch for
 /// hand-edited config.json, when two checkouts share a folder name).
-fn filter_of(filters: &HashMap<String, String>, s: &Session) -> Filter {
+fn filter_of(
+    filters: &HashMap<String, String>,
+    mutes: &HashMap<String, String>,
+    id: &str,
+    s: &Session,
+) -> Filter {
+    // the chat-level gesture wins: it is the more specific and the more
+    // recent of the two, and it is the one she just made
+    if let Some(m) = mutes.get(id) {
+        return Filter::parse(m);
+    }
     if filters.is_empty() {
         return Filter::Normal;
     }
@@ -1225,11 +1235,26 @@ fn publish(reg: &HashMap<String, Session>, handle: &AppHandle, blind: Option<&st
     // next tick (<=1s) with no extra plumbing. try_state, not state: a panic
     // here would kill the state thread, and a dead state thread is exactly
     // the silent failure the watchdog exists to prevent.
-    let filters = handle
-        .try_state::<crate::AppState>()
+    let st = handle.try_state::<crate::AppState>();
+    let filters = st
+        .as_ref()
         .map(|st| st.cfg.lock_or_recover().filters.clone())
         .unwrap_or_default();
-    let payload = reduce(reg, blind, cowork_health, &filters);
+    // A mute dies with its chat. Pruning here (rather than on the SessionEnd
+    // event) also catches the sessions the orphan sweep drops, which never
+    // send one — otherwise a crashed CLI would leave its mute behind to
+    // land on nothing, or worse, on a reused id.
+    let mutes = st
+        .as_ref()
+        .map(|st| {
+            let mut m = st.session_mutes.lock_or_recover();
+            if !m.is_empty() {
+                m.retain(|id, _| reg.contains_key(id));
+            }
+            m.clone()
+        })
+        .unwrap_or_default();
+    let payload = reduce(reg, blind, cowork_health, &filters, &mutes);
     let store = handle.state::<PetStateStore>();
     let mut cur = store.0.lock_or_recover();
     if same_display(&cur, &payload) {
@@ -1258,6 +1283,7 @@ fn reduce(
     blind_reason: Option<&str>,
     cowork_health: &str,
     filters: &HashMap<String, String>,
+    mutes: &HashMap<String, String>,
 ) -> PetStatePayload {
     let now = Instant::now();
     // ONE predicate, resolved once and used by BOTH the list and the
@@ -1266,7 +1292,7 @@ fn reduce(
     // popover and his face cannot disagree about who counts.
     let kept: Vec<(&String, &Session, Filter)> = reg
         .iter()
-        .map(|(id, s)| (id, s, filter_of(filters, s)))
+        .map(|(id, s)| (id, s, filter_of(filters, mutes, id, s)))
         .filter(|(_, _, f)| *f != Filter::Ignore)
         .collect();
     let mut sessions: Vec<SessionInfo> = kept
@@ -1375,7 +1401,7 @@ mod cowork_tests {
         assert_eq!(s.detail, "Claude est\u{e1} esperando tu respuesta");
         assert_eq!(s.title, "Example Cowork session");
         assert_eq!(s.link_id, SID_DISPLAY);
-        assert_eq!(reduce(&reg, None, "", &HashMap::new()).state, "idle");
+        assert_eq!(reduce(&reg, None, "", &HashMap::new(), &HashMap::new()).state, "idle");
         // a live toast afterwards is a real ask
         apply(&mut reg, &mut cw, &[added(2, &format!("cowork-awaiting-{SID_DISPLAY}"), "", "Permission request", "B")]);
         assert_eq!(reg[SID].state, S::NeedsInput);
@@ -1417,7 +1443,7 @@ mod cowork_tests {
             "Example Cowork session", "Claude está esperando tu respuesta")]);
         assert_eq!(reg.len(), 1);
         assert_eq!((reg[SID].state, reg[SID].kind.as_str()), (S::NeedsInput, "idle_prompt"));
-        let p = reduce(&reg, None, "", &HashMap::new());
+        let p = reduce(&reg, None, "", &HashMap::new(), &HashMap::new());
         assert_eq!(p.state, "needs_input");
         assert_eq!(p.sessions[0].surface, "cowork");
         assert_eq!(p.sessions[0].link_id, SID_DISPLAY);
@@ -1507,7 +1533,7 @@ mod cowork_tests {
         let s = &reg["local_842d0b96"];
         assert_eq!((s.surface, s.state, s.kind.as_str()), (Surface::CoworkLocal, S::NeedsInput, "elicitation_dialog"));
         assert_eq!(s.title, "Cleanup");
-        assert_eq!(reduce(&reg, None, "", &HashMap::new()).sessions[0].surface, "cowork");
+        assert_eq!(reduce(&reg, None, "", &HashMap::new(), &HashMap::new()).sessions[0].surface, "cowork");
     }
 
     #[test]
@@ -1588,7 +1614,7 @@ mod cowork_tests {
         assert_eq!(cw.blind_reason(), None, "no cloud activity: a header line, not blind");
         apply(&mut reg, &mut cw, &[activity(SID, &["F"])]);
         assert_eq!(cw.blind_reason().as_deref(), Some("Cowork prompts invisible: notification store unreadable: x"));
-        let p = reduce(&reg, cw.blind_reason().as_deref(), &cw.health.summary(), &HashMap::new());
+        let p = reduce(&reg, cw.blind_reason().as_deref(), &cw.health.summary(), &HashMap::new(), &HashMap::new());
         assert_eq!(p.state, "blind");
         assert!(p.blind);
         assert_eq!(p.cowork_health, "notification store unreadable: x");
@@ -1637,7 +1663,7 @@ mod cowork_tests {
         assert_eq!(reg["cli-2"].link_id, "");
         attach_links(&mut reg, &cw);
         assert_eq!(reg["cli-2"].link_id, "local_b");
-        let p = reduce(&reg, None, "", &HashMap::new());
+        let p = reduce(&reg, None, "", &HashMap::new(), &HashMap::new());
         assert!(p.sessions.iter().all(|s| s.surface == "code" && s.link_id.starts_with("local_")));
     }
 
@@ -1648,7 +1674,7 @@ mod cowork_tests {
         apply(&mut reg, &mut cw, &[activity(SID, &["F"]), added(1, &format!("cowork-idle-{SID_DISPLAY}"), "", "T", "B")]);
         let h = &reg["hook"];
         assert_eq!((h.surface, h.state), (Surface::Hook, S::Working));
-        let p = reduce(&reg, None, "", &HashMap::new());
+        let p = reduce(&reg, None, "", &HashMap::new(), &HashMap::new());
         let hook = p.sessions.iter().find(|s| s.id == "hook").unwrap();
         assert_eq!((hook.surface, hook.title.as_str(), hook.link_id.as_str()), ("code", "", ""));
     }
@@ -1678,6 +1704,11 @@ mod filter_tests {
         s
     }
 
+    /// no chat-level mutes: the cwd-rule tests are about the other table
+    fn no_mutes() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
     fn rules(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
     }
@@ -1698,14 +1729,14 @@ mod filter_tests {
         let live = sess("C:\\Users\\Queen Mapache\\Documents\\GitHub\\clawdbot", S::Working);
         let recovered = sess("C--Users-Queen-Mapache-Documents-GitHub-clawdbot", S::Working);
         let r = rules(&[("clawdbot", "ignore")]);
-        assert_eq!(filter_of(&r, &live), Filter::Ignore);
-        assert_eq!(filter_of(&r, &recovered), Filter::Ignore);
+        assert_eq!(filter_of(&r, &no_mutes(), "id-live", &live), Filter::Ignore);
+        assert_eq!(filter_of(&r, &no_mutes(), "id-rec", &recovered), Filter::Ignore);
     }
 
     #[test]
     fn cowork_rows_key_on_title_because_they_have_no_path() {
         let s = cowork("Example Cowork session", S::Working);
-        assert_eq!(filter_of(&rules(&[("Example Cowork session", "quiet")]), &s), Filter::Quiet);
+        assert_eq!(filter_of(&rules(&[("Example Cowork session", "quiet")]), &no_mutes(), "id", &s), Filter::Quiet);
     }
 
     #[test]
@@ -1713,14 +1744,14 @@ mod filter_tests {
         let a = sess("/home/mapache/work/clawdbot", S::Working);
         let b = sess("/home/mapache/fork/clawdbot", S::Working);
         let r = rules(&[("/home/mapache/fork/clawdbot", "ignore")]);
-        assert_eq!(filter_of(&r, &a), Filter::Normal);
-        assert_eq!(filter_of(&r, &b), Filter::Ignore);
+        assert_eq!(filter_of(&r, &no_mutes(), "id-a", &a), Filter::Normal);
+        assert_eq!(filter_of(&r, &no_mutes(), "id-b", &b), Filter::Ignore);
     }
 
     #[test]
     fn an_unknown_rule_word_never_silently_hides_a_project() {
         let s = sess("/x/clawdbot", S::Working);
-        assert_eq!(filter_of(&rules(&[("clawdbot", "qiuet")]), &s), Filter::Normal);
+        assert_eq!(filter_of(&rules(&[("clawdbot", "qiuet")]), &no_mutes(), "id", &s), Filter::Normal);
     }
 
     #[test]
@@ -1728,7 +1759,7 @@ mod filter_tests {
         let mut reg = HashMap::new();
         reg.insert("a".to_string(), sess("/x/noisy", S::NeedsInput));
         reg.insert("b".to_string(), working("/x/real"));
-        let p = reduce(&reg, None, "", &rules(&[("noisy", "ignore")]));
+        let p = reduce(&reg, None, "", &rules(&[("noisy", "ignore")]), &no_mutes());
         assert_eq!(p.n_sessions, 1);
         assert_eq!(p.sessions.len(), 1);
         assert_eq!(p.sessions[0].cwd, "/x/real");
@@ -1742,7 +1773,7 @@ mod filter_tests {
         let mut reg = HashMap::new();
         reg.insert("a".to_string(), sess("/x/noisy", S::NeedsInput));
         reg.insert("b".to_string(), working("/x/real"));
-        let p = reduce(&reg, None, "", &rules(&[("noisy", "quiet")]));
+        let p = reduce(&reg, None, "", &rules(&[("noisy", "quiet")]), &no_mutes());
         assert_eq!(p.n_sessions, 2, "quiet rows still count");
         assert_eq!(p.sessions.len(), 2, "quiet rows are still shown");
         let q = p.sessions.iter().find(|s| s.cwd == "/x/noisy").unwrap();
@@ -1756,7 +1787,7 @@ mod filter_tests {
         // so with nothing else live there is nothing for him to be
         let mut reg = HashMap::new();
         reg.insert("a".to_string(), sess("/x/noisy", S::NeedsInput));
-        let p = reduce(&reg, None, "", &rules(&[("noisy", "quiet")]));
+        let p = reduce(&reg, None, "", &rules(&[("noisy", "quiet")]), &no_mutes());
         assert_eq!(p.state, "sleeping");
         assert_eq!(p.sessions.len(), 1);
     }
@@ -1766,7 +1797,7 @@ mod filter_tests {
         let mut reg = HashMap::new();
         reg.insert("a".to_string(), sess("/x/one", S::NeedsInput));
         reg.insert("b".to_string(), working("/x/two"));
-        let p = reduce(&reg, None, "", &HashMap::new());
+        let p = reduce(&reg, None, "", &HashMap::new(), &HashMap::new());
         assert_eq!(p.n_sessions, 2);
         assert_eq!(p.state, "needs_input");
         assert!(p.sessions.iter().all(|s| s.filtered.is_empty()));
@@ -1777,9 +1808,54 @@ mod filter_tests {
         // an ignored project has no row left to clear the rule from; if the
         // payload did not carry the table, the UI could not offer the undo
         let reg = HashMap::new();
-        let p = reduce(&reg, None, "", &rules(&[("gone", "ignore")]));
+        let p = reduce(&reg, None, "", &rules(&[("gone", "ignore")]), &no_mutes());
         assert!(p.sessions.is_empty());
         assert_eq!(p.filters.get("gone").map(String::as_str), Some("ignore"));
+    }
+
+    #[test]
+    fn a_chat_mute_beats_a_cwd_rule_either_way() {
+        // the chat-level gesture is the more specific and the more recent
+        let s = sess("/x/clawdbot", S::Working);
+        // mute one chat inside an otherwise-unfiltered project
+        assert_eq!(filter_of(&no_mutes(), &rules(&[("sid", "quiet")]), "sid", &s), Filter::Quiet);
+        // and un-mute one chat inside a project that is muted wholesale
+        assert_eq!(
+            filter_of(&rules(&[("clawdbot", "ignore")]), &rules(&[("sid", "none")]), "sid", &s),
+            Filter::Normal,
+        );
+    }
+
+    #[test]
+    fn a_mute_applies_to_one_chat_not_its_neighbours_in_the_same_repo() {
+        // the case cwd-keying could never serve: both of them in one repo
+        let mut reg = HashMap::new();
+        reg.insert("hers".to_string(), sess("/x/clawdbot", S::NeedsInput));
+        reg.insert("his".to_string(), working("/x/clawdbot"));
+        let p = reduce(&reg, None, "", &no_mutes(), &rules(&[("his", "quiet")]));
+        assert_eq!(p.n_sessions, 2);
+        let his = p.sessions.iter().find(|s| s.id == "his").unwrap();
+        let hers = p.sessions.iter().find(|s| s.id == "hers").unwrap();
+        assert_eq!(his.filtered, "quiet");
+        assert_eq!(hers.filtered, "", "same cwd, untouched");
+        assert_eq!(p.state, "needs_input", "her ask still reaches him");
+    }
+
+    #[test]
+    fn a_mute_is_keyed_on_the_id_so_a_cleared_chat_starts_clean() {
+        // he takes over her chat and clears the context: new session id, so
+        // the same registry slot is no longer muted
+        let mut reg = HashMap::new();
+        reg.insert("old-id".to_string(), sess("/x/clawdbot", S::NeedsInput));
+        let m = rules(&[("old-id", "quiet")]);
+        assert_eq!(reduce(&reg, None, "", &no_mutes(), &m).state, "sleeping");
+        reg.clear();
+        reg.insert("new-id".to_string(), sess("/x/clawdbot", S::NeedsInput));
+        assert_eq!(
+            reduce(&reg, None, "", &no_mutes(), &m).state,
+            "needs_input",
+            "the mute must not follow a chat that changed hands",
+        );
     }
 
     #[test]
@@ -1787,8 +1863,8 @@ mod filter_tests {
         // same_display gates every emit; if it ignored the table, toggling a
         // rule on an empty registry would never reach the webview
         let reg = HashMap::new();
-        let a = reduce(&reg, None, "", &HashMap::new());
-        let b = reduce(&reg, None, "", &rules(&[("gone", "ignore")]));
+        let a = reduce(&reg, None, "", &HashMap::new(), &HashMap::new());
+        let b = reduce(&reg, None, "", &rules(&[("gone", "ignore")]), &no_mutes());
         assert!(!same_display(&a, &b));
     }
 }

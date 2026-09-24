@@ -138,6 +138,16 @@ pub(crate) struct AppState {
     pub(crate) cfg: Mutex<PetConfig>,
     dirty: AtomicBool,
     drag: Mutex<Option<DragGrab>>,
+    /// Per-CHAT mutes, session id -> `"quiet"`/`"ignore"`.
+    ///
+    /// Deliberately NOT in PetConfig, so it is never written to disk: a mute
+    /// is a gesture about the chat in front of you right now, and ownership
+    /// of a chat moves — one of them takes over a session the other was
+    /// using, clears its context, and it becomes a different session id. The
+    /// mute must not follow it. Pruned when the session leaves the registry,
+    /// and gone entirely on restart, which is the honest lifetime for
+    /// something that means "not this one, not now".
+    pub(crate) session_mutes: Mutex<std::collections::HashMap<String, String>>,
 }
 
 fn left_button_down() -> bool {
@@ -307,6 +317,29 @@ fn set_session_filter(state: tauri::State<AppState>, name: String, mode: String)
     state.dirty.store(true, Ordering::Relaxed);
 }
 
+/// Mute one chat by session id. `mode` is `"quiet"`, `"ignore"`, or anything
+/// else to clear it.
+///
+/// This is the primary control: the row she is looking at, muted for as long
+/// as that chat lives. `set_session_filter` (per-cwd) remains for the
+/// different, longer-lived problem of "never bother me about scratch".
+/// Where both apply, this one wins.
+#[tauri::command]
+fn set_session_mute(state: tauri::State<AppState>, id: String, mode: String) {
+    if id.is_empty() {
+        return;
+    }
+    let mut m = state.session_mutes.lock_or_recover();
+    match mode.as_str() {
+        "quiet" | "ignore" => {
+            m.insert(id, mode);
+        }
+        _ => {
+            m.remove(&id);
+        }
+    }
+}
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -353,8 +386,9 @@ fn main() {
             cfg: Mutex::new(cfg),
             dirty: AtomicBool::new(false),
             drag: Mutex::new(None),
+            session_mutes: Mutex::new(Default::default()),
         })
-        .invoke_handler(tauri::generate_handler![set_opaque_bounds, start_drag, end_drag, set_pet_scale, get_pet_scale, set_session_filter, quit_app, open_new_code_session, open_claude_link, state::get_pet_state])
+        .invoke_handler(tauri::generate_handler![set_opaque_bounds, start_drag, end_drag, set_pet_scale, get_pet_scale, set_session_filter, set_session_mute, quit_app, open_new_code_session, open_claude_link, state::get_pet_state])
         .setup(move |app| {
             // event pipeline: hook server thread -> mpsc -> state thread.
             // A failed bind never exits and never moves ports (the installed

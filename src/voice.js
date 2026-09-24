@@ -328,7 +328,14 @@ function audioCtx() {
 }
 
 // `shape` nudges the melody: 'up' for something finished well, 'flat' for a
-// small acknowledgement like a bite.
+// small acknowledgement like a bite, 'ask' for a question.
+//
+// 'ask' is the only shape that GLIDES. Discrete steps read as a jingle no
+// matter how you space them — it is the continuous rise at the end of a
+// phrase that English hears as a question, the same reason the talking
+// squash works on rhythm rather than on pitch. So the last blip ramps its
+// own frequency upward while it sounds, and the blips before it stay put to
+// give that rise something to push off from.
 function chirp(count = 3, shape = 'up') {
   if (!settings.enabled || !settings.chirp) return false;
   const ctx = audioCtx();
@@ -343,19 +350,29 @@ function chirp(count = 3, shape = 'up') {
     lp.type = 'lowpass';
     lp.frequency.value = 2600;
     osc.type = 'triangle';
-    const step = shape === 'up' ? i * 0.14 : (i % 2) * 0.07;
+    const last = i === count - 1;
+    let step;
+    if (shape === 'up') step = i * 0.14;
+    else if (shape === 'ask') step = last ? 0.1 : 0; // flat, then the rise
+    else step = (i % 2) * 0.07;
     const detune = 1 + (Math.random() - 0.5) * 0.04;
-    osc.frequency.value = base * (1 + step) * detune;
+    const f0 = base * (1 + step) * detune;
+    osc.frequency.value = f0;
+    // the question: the final blip bends up a fifth while it rings, and is
+    // held longer than the others so the bend is audible rather than implied
+    const ask = shape === 'ask' && last;
+    if (ask) osc.frequency.linearRampToValueAtTime(f0 * 1.5, t + 0.16);
     const peak = Math.max(0, Math.min(1, Number(settings.volume))) * 0.22;
     gain.gain.setValueAtTime(0.0001, t);
     gain.gain.linearRampToValueAtTime(peak, t + 0.005);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.075);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + (ask ? 0.185 : 0.075));
     osc.connect(lp); lp.connect(gain); gain.connect(ctx.destination);
     osc.start(t);
-    osc.stop(t + 0.09);
-    t += 0.055;
+    osc.stop(t + (ask ? 0.2 : 0.09));
+    t += ask ? 0.2 : 0.055;
   }
-  speakingFor(count * 55 + 120); // bob along with the blips
+  // bob along with the blips; the 'ask' glide adds its own held tail
+  speakingFor(count * 55 + 120 + (shape === 'ask' ? 145 : 0));
   return true;
 }
 
@@ -416,7 +433,19 @@ async function finished({ name, busyMs } = {}) {
   return chirp(3, 'up') ? 'chirp' : null;
 }
 
+// A muted chat wants something. Deliberately NOT `alert`: no sentence, no
+// spoken ask, no cooldown shared with the loud path — just the question
+// sound. This is the whole of what "quiet" is allowed to do out loud.
+let lastAskAt = 0;
+function asked() {
+  if (!settings.enabled) return null;
+  const now = Date.now();
+  if (now - lastAskAt < COOLDOWN_MS.needs_input) return null;
+  lastAskAt = now;
+  return chirp(2, 'ask') ? 'chirp' : null;
+}
+
 export {
-  alert, finished, chirp, say, warm, stop, get, set, nudge, onSpeaking,
+  alert, finished, asked, chirp, say, warm, stop, get, set, nudge, onSpeaking,
   lineFor, phraseAsk, sanitise, systemBackend, DEFAULTS, LIMITS,
 };
