@@ -512,8 +512,7 @@
     voiceRow.hidden = !show;
     voicePickRow.hidden = !show;
     toneRow.hidden = !show;
-    // an empty rules row would be a bare "rules:" label with nothing after it
-    filterRow.hidden = !show || !Object.keys(currentFilters()).length;
+    renderFilterRow(true); // owns its own visibility (gear open + rules exist)
     reportBounds();
   };
   themeRow.querySelectorAll('button[data-theme]').forEach((b) => {
@@ -715,7 +714,10 @@
       b.onclick = (e) => { e.stopPropagation(); setFilter(n, ''); };
       filterRow.appendChild(b);
     }
-    if (!names.length) filterRow.hidden = true;
+    // visible exactly when the gear panel is open and there is something to
+    // show: muting a row with the panel already open reveals the chip on
+    // that click, and clearing the last rule collapses the row again
+    filterRow.hidden = !names.length || themeRow.hidden;
   }
 
   const POP_RANK = { needs_input: 6, error: 5, working: 3, thinking: 3, done: 2, idle: 1 };
