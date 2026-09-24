@@ -58,14 +58,16 @@ const DEFAULTS = {
   voiceName: '',   // '' = fall back to PREFERRED, then the browser default
   volume: 0.9,
   rate: 1,
-  // a touch above natural: the Windows voices are newsreader-flat, and a
-  // small lift is the difference between a narrator and a small colleague.
-  // 0-2 in the Web Speech API; past ~1.6 it turns into a chipmunk.
-  pitch: 1.15,
+  // Well above natural, chosen by ear: the Windows voices are newsreader-flat
+  // and Mark at this pitch is the one that reads as a small colleague rather
+  // than a narrator. Squarely in cartoon territory, which is the point.
+  pitch: 1.8,
   speakDetail: true,
 };
 
-const LIMITS = { pitch: [0.5, 1.8], rate: [0.6, 1.6], volume: [0, 1] };
+// pitch tops out at 2 because that is the Web Speech API's own maximum, not
+// because anything here breaks first
+const LIMITS = { pitch: [0.5, 2], rate: [0.6, 1.6], volume: [0, 1] };
 const clamp = (v, [lo, hi]) => Math.min(hi, Math.max(lo, Math.round(v * 100) / 100));
 
 let settings = { ...DEFAULTS };
