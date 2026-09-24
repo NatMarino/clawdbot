@@ -250,6 +250,7 @@
     <button data-voice="on">on</button>
     <button data-voice="off">off</button>
     <button id="voice-detail" title="also read the ask itself, not just the opener">+ask</button>
+    <button id="voice-chirp" title="a little chirp when he finishes a turn">chirp</button>
     <button id="voice-test" title="hear it now">test</button>
   </div>
   <!-- one button per installed English voice, filled in once at startup
@@ -512,12 +513,14 @@
 
   // --- voice row: he says the ask out loud on needs_input and error ---
   const voiceDetailBtn = document.getElementById('voice-detail');
+  const voiceChirpBtn = document.getElementById('voice-chirp');
   function syncVoiceButtons() {
     const v = voice.get();
     voiceRow.querySelectorAll('button[data-voice]').forEach((b) => {
       b.classList.toggle('active', (b.dataset.voice === 'on') === !!v.enabled);
     });
     voiceDetailBtn.classList.toggle('active', !!v.speakDetail);
+    voiceChirpBtn.classList.toggle('active', !!v.chirp);
   }
   syncVoiceButtons();
   voiceRow.querySelectorAll('button[data-voice]').forEach((b) => {
@@ -534,10 +537,19 @@
     voice.set({ speakDetail: !voice.get().speakDetail });
     syncVoiceButtons();
   };
+  voiceChirpBtn.onclick = (e) => {
+    e.stopPropagation();
+    const on = !voice.get().chirp;
+    voice.set({ chirp: on });
+    syncVoiceButtons();
+    if (on) voice.chirp(3, 'up'); // hear what you just switched on
+  };
+  // the Test button forces the greeting on: you are listening for the whole
+  // shape, not rolling the dice on whether he says hello this time
   function sampleLine() {
     const top = lastPipeline ? topSession(lastPipeline) : null;
     return voice.lineFor('needs_input', 'elicitation', top ? rowName(top) : 'Claw’d',
-      'This is what I sound like when Claude needs you.');
+      'This is what I sound like when Claude needs you.', true);
   }
   document.getElementById('voice-test').onclick = (e) => {
     e.stopPropagation();
@@ -983,17 +995,31 @@
   // This comparison is also what makes the meal safe: endMeal() re-applies
   // the unchanged lastPipeline, which is not a transition, so he doesn't
   // re-announce the same ask after every treat.
+  // when the reduced state last actually changed — used to tell a long job
+  // from a two-second reply when he finishes
+  let stateSince = Date.now();
+
   function maybeSpeak(prev, p) {
-    if (!voiceArmed || !p) return;
-    if (p.state !== 'needs_input' && p.state !== 'error') return;
-    if (prev && prev.state === p.state && prev.kind === p.kind) return;
+    if (!p) return;
+    const changed = !prev || prev.state !== p.state;
+    const heldMs = changed ? Date.now() - stateSince : 0;
+    if (changed) stateSince = Date.now();
+    if (!voiceArmed) return;
     const top = topSession(p);
-    voice.alert({
-      state: p.state,
-      kind: p.kind,
-      name: top ? rowName(top) : '',
-      detail: p.detail,
-    });
+    const name = top ? rowName(top) : '';
+
+    if (p.state === 'needs_input' || p.state === 'error') {
+      if (prev && prev.state === p.state && prev.kind === p.kind) return;
+      voice.alert({ state: p.state, kind: p.kind, name, detail: p.detail });
+      return;
+    }
+    // finishing a turn: a chirp, or a sentence if the job actually took a
+    // while. Only when he was genuinely busy first — a done arriving from
+    // idle is bookkeeping, not an accomplishment.
+    if (p.state === 'done' && changed && prev &&
+        (prev.state === 'working' || prev.state === 'thinking')) {
+      voice.finished({ name, busyMs: heldMs });
+    }
   }
   function recordPipeline(p) {
     const prev = lastPipeline; // captured before the overwrite: the only
@@ -1084,6 +1110,7 @@
     setTimeout(() => {
       treatLayer.clear();                 // taken in one bite
       if (pet.state !== 'eating') return; // cut short: nothing was eaten
+      voice.chirp(2, 'flat');             // a small happy noise, not a sentence
       treats = { count: treats.count + 1, lastFedAt: Date.now() };
       try { localStorage.setItem('treats', JSON.stringify(treats)); } catch {}
       treatBtn.classList.remove('peckish');

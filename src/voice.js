@@ -25,14 +25,36 @@
 // elicitation_dialog | elicitation | unknown, plus '' for anything that
 // is not needs_input. Several lines per key so a long afternoon of
 // prompts isn't one sentence on a loop.
-const LINES = {
-  elicitation:        ['Hello friend. I have a question.', '{name} is asking you something.', 'Hey! {name} has a question for you.'],
-  elicitation_dialog: ['Hello friend. I have a question.', '{name} wants to ask you something.'],
-  permission:         ['{name} is asking permission.', 'Hello friend. {name} needs your OK.'],
-  idle_prompt:        ['{name} is waiting on you.', 'Hey. {name} is waiting.'],
-  agent_needs_input:  ['{name} needs your input.', 'Hello friend. {name} needs you.'],
-  unknown:            ['{name} wants something.', 'Hey. {name} needs a look.'],
-  error:              ['{name} hit an error.', 'Uh oh. {name} broke something.'],
+// Greeting and ask are SEPARATE, because a pet that opens every single
+// sentence with "Hello friend" stops being charming by the third time. The
+// greeting shows up sometimes (GREET_CHANCE) and never twice running.
+const GREETINGS = [
+  'Hello friend.', 'Hey.', 'Hi there.', 'Psst.', 'Oh!', 'Hello.',
+  'Excuse me.', 'Hey friend.', 'Ahem.',
+];
+const GREET_CHANCE = 0.4;
+
+// The fallback ask, used when the payload carries no useful detail of its
+// own. When there IS a detail he says that instead — it is a better sentence
+// than anything canned, because it was written for this exact situation.
+const ASKS = {
+  elicitation:        ['{name} has a question.', '{name} is asking you something.'],
+  elicitation_dialog: ['{name} has a question for you.', '{name} wants to ask you something.'],
+  permission:         ['{name} is asking permission.', '{name} wants your OK.'],
+  idle_prompt:        ['{name} is waiting on you.', '{name} is waiting.'],
+  agent_needs_input:  ['{name} needs your input.', '{name} needs you.'],
+  unknown:            ['{name} wants something.', '{name} needs a look.'],
+  error:              ['{name} hit an error.', 'Uh oh. {name} broke something.', '{name} fell over.'],
+};
+
+// `tool_name: scrap` is the shape the reducer builds for a permission ask
+// (state.rs tool_detail). The scrap is the one-line description Claude writes
+// for its own tool calls, so it is already a summary of the situation —
+// turning it into a question is the whole trick. For tools whose scrap is a
+// bare path instead of a description, the tool name supplies the verb.
+const TOOL_VERB = {
+  Edit: 'edit', Write: 'write', Read: 'read', NotebookEdit: 'edit',
+  WebFetch: 'fetch', Glob: 'look for', Grep: 'search for',
 };
 
 // Cooldown, bucketed by STATE rather than by kind. The reducer can flap while
@@ -41,7 +63,16 @@ const LINES = {
 // same settling burst speak three times. One bucket for every flavour of ask
 // is what actually keeps him quiet. Rust already suppresses byte-identical
 // payloads; this is the belt to that pair of braces.
-const COOLDOWN_MS = { needs_input: 20000, error: 30000 };
+const COOLDOWN_MS = { needs_input: 20000, error: 30000, done: 120000 };
+
+// Finishing is NOT a rare event: the Stop hook fires every time Claude ends a
+// turn, so `done` lands after every single reply and then decays to idle 10s
+// later (state.rs DONE_TO_IDLE). Words there would be relentless — so a
+// finish is a chirp, and only a job that actually took a while earns a
+// spoken line.
+const DONE_LINES = ['All done.', 'Finished.', 'That one is done.', 'All finished.', '{name} is done.'];
+const LONG_TASK_MS = 90000;
+const CHIRP_GAP_MS = 3000;
 
 const MAX_CHARS = 300;
 
@@ -58,6 +89,7 @@ const DEFAULTS = {
   voiceName: '',   // '' = fall back to PREFERRED, then the browser default
   volume: 0.9,
   rate: 1,
+  chirp: true,
   // Well above natural, chosen by ear: the Windows voices are newsreader-flat
   // and Mark at this pitch is the one that reads as a small colleague rather
   // than a narrator. Squarely in cartoon territory, which is the point.
@@ -128,19 +160,56 @@ function cap(text, n = MAX_CHARS) {
   return (stop > n * 0.6 ? cut.slice(0, stop) : cut).trim();
 }
 
-const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+// pick, but never the same one twice running — repetition is what makes a
+// canned line sound canned
+const lastPicked = {};
+function pick(arr, bucket) {
+  if (arr.length < 2) return arr[0];
+  let v;
+  do { v = arr[Math.floor(Math.random() * arr.length)]; } while (bucket && v === lastPicked[bucket]);
+  if (bucket) lastPicked[bucket] = v;
+  return v;
+}
+
+// Turn the reducer's detail into something worth saying out loud.
+// "PowerShell: Query live pet state"  -> "Can I query live pet state?"
+// "Edit: index.html"                  -> "Can I edit index.html?"
+// "Which approach should I use?"      -> unchanged, it is already a question
+function phraseAsk(detail) {
+  const raw = String(detail || '').trim();
+  if (!raw) return '';
+  const m = raw.match(/^([A-Z][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*):\s*(.+)$/);
+  if (m) {
+    const tool = m[1];
+    // a URL scrap must be caught before sanitise(), which flattens every URL
+    // to the words "a link" — fine mid-sentence, nonsense as the object of a
+    // question ("Can I a link?"). The host is what you actually want to hear.
+    const url = m[2].match(/^https?:\/\/([^/\s]+)/);
+    if (url) return `Can I ${TOOL_VERB[tool] || 'open'} ${url[1].replace(/^www\./, '')}?`;
+    const scrap = cap(sanitise(m[2])).replace(/[.\s]+$/, '');
+    if (!scrap) return '';
+    // a scrap with spaces is a written description; a bare token is an object
+    // the tool acts on, so the tool name has to supply the verb
+    if (/\s/.test(scrap)) return 'Can I ' + scrap.charAt(0).toLowerCase() + scrap.slice(1) + '?';
+    const verb = TOOL_VERB[tool];
+    return verb ? `Can I ${verb} ${scrap}?` : `Can I run ${tool} on ${scrap}?`;
+  }
+  return cap(sanitise(raw));
+}
 
 // Compose what he should say for a reduced payload. Exported so the host can
 // show it (and so it can be unit-checked without making a sound).
-function lineFor(state, kind, name, detail) {
-  const key = state === 'error' ? 'error' : (LINES[kind] ? kind : 'unknown');
-  const opener = pick(LINES[key]).replace(/\{name\}/g, name || 'Claude');
-  if (!settings.speakDetail) return opener;
-  const body = cap(sanitise(detail));
-  if (!body) return opener;
-  // don't say the same thing twice when the detail just restates the opener
-  if (opener.toLowerCase().includes(body.toLowerCase().slice(0, 24))) return opener;
-  return opener + ' ' + body;
+// `forceGreeting` is for the settings Test button, where you want to hear the
+// whole shape rather than roll the dice on it.
+function lineFor(state, kind, name, detail, forceGreeting) {
+  const key = state === 'error' ? 'error' : (ASKS[kind] ? kind : 'unknown');
+  const who = name || 'Claude';
+  const body = settings.speakDetail ? phraseAsk(detail) : '';
+  // the detail, when there is one, IS the ask — the canned line is only the
+  // fallback for a payload that carries nothing useful
+  const ask = body || pick(ASKS[key], 'ask:' + key).replace(/\{name\}/g, who);
+  const greet = (forceGreeting || Math.random() < GREET_CHANCE) ? pick(GREETINGS, 'greet') + ' ' : '';
+  return greet + ask;
 }
 
 // --- backends ---------------------------------------------------------
@@ -202,6 +271,59 @@ const espeakBackend = {
 
 const BACKENDS = { system: systemBackend, espeak: espeakBackend };
 
+// --- chirp: the animalese burst ---------------------------------------
+//
+// A few short pitched blips, the Animal Crossing trick: no synthesizer, no
+// samples, just an oscillator with a fast envelope. This is what he uses for
+// things that happen CONSTANTLY — finishing a turn, taking a bite — where a
+// spoken sentence would be unbearable but silence is a missed beat.
+//
+// Triangle rather than square: square alone reads as chiptune, triangle
+// through a gentle lowpass sits closer to AC's warmth. ~5ms attack, ~70ms
+// decay, ~55ms apart, a few cents of random detune so repeats aren't
+// mechanical.
+let audio = null;
+function audioCtx() {
+  if (!audio) {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return null;
+    audio = new C();
+  }
+  if (audio.state === 'suspended') audio.resume().catch(() => {});
+  return audio;
+}
+
+// `shape` nudges the melody: 'up' for something finished well, 'flat' for a
+// small acknowledgement like a bite.
+function chirp(count = 3, shape = 'up') {
+  if (!settings.enabled || !settings.chirp) return false;
+  const ctx = audioCtx();
+  if (!ctx) return false;
+  // follows the voice pitch, so the chirp belongs to the same character
+  const base = 300 * Math.max(0.6, Number(settings.pitch) || 1);
+  let t = ctx.currentTime + 0.01;
+  for (let i = 0; i < count; i++) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 2600;
+    osc.type = 'triangle';
+    const step = shape === 'up' ? i * 0.14 : (i % 2) * 0.07;
+    const detune = 1 + (Math.random() - 0.5) * 0.04;
+    osc.frequency.value = base * (1 + step) * detune;
+    const peak = Math.max(0, Math.min(1, Number(settings.volume))) * 0.22;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.linearRampToValueAtTime(peak, t + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.075);
+    osc.connect(lp); lp.connect(gain); gain.connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.09);
+    t += 0.055;
+  }
+  return true;
+}
+
 let active = null;
 
 async function backend() {
@@ -242,4 +364,24 @@ async function alert({ state, kind, name, detail }) {
   return text;
 }
 
-export { alert, say, warm, stop, get, set, nudge, lineFor, sanitise, systemBackend, DEFAULTS, LIMITS };
+// A turn ended. `busyMs` is how long he was working beforehand — a long job
+// gets a sentence, everything else gets the chirp.
+let lastChirpAt = 0;
+async function finished({ name, busyMs } = {}) {
+  if (!settings.enabled) return null;
+  const now = Date.now();
+  if (busyMs >= LONG_TASK_MS && now - (lastSpokeAt.done || 0) >= COOLDOWN_MS.done) {
+    lastSpokeAt.done = now;
+    const text = pick(DONE_LINES, 'done').replace(/\{name\}/g, name || 'Claude');
+    await say(text);
+    return text;
+  }
+  if (now - lastChirpAt < CHIRP_GAP_MS) return null;
+  lastChirpAt = now;
+  return chirp(3, 'up') ? 'chirp' : null;
+}
+
+export {
+  alert, finished, chirp, say, warm, stop, get, set, nudge,
+  lineFor, phraseAsk, sanitise, systemBackend, DEFAULTS, LIMITS,
+};
