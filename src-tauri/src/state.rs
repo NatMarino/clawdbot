@@ -9,7 +9,7 @@
 //   responded (the next real event for that session replaces the state)
 // - a deaf pet must say it's deaf (blind), never look peacefully idle
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -50,6 +50,99 @@ impl Surface {
             Surface::CoworkCloud | Surface::CoworkLocal => "cowork",
         }
     }
+}
+
+/// Per-project attention rule. Nat names which projects he should care
+/// about; everything unnamed is `Normal`.
+///
+/// `Quiet` still appears in the popover and still counts — it just never
+/// wins the `top` fold, so it can drive neither his face nor his voice.
+/// `Ignore` is dropped before anything looks at it: not listed, not counted,
+/// not ranked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Filter {
+    Normal,
+    Quiet,
+    Ignore,
+}
+
+impl Filter {
+    fn parse(s: &str) -> Filter {
+        match s {
+            "quiet" => Filter::Quiet,
+            "ignore" => Filter::Ignore,
+            // an unknown rule must not silently mute a project: a typo in
+            // config.json reads as "no rule", never as "hide this"
+            _ => Filter::Normal,
+        }
+    }
+
+    /// what the payload carries; `Normal` carries nothing
+    fn name(self) -> &'static str {
+        match self {
+            Filter::Normal => "",
+            Filter::Quiet => "quiet",
+            Filter::Ignore => "ignore",
+        }
+    }
+}
+
+/// The last path segment, untangling the mangled slug a recovered session
+/// carries instead of a path (`C--Users-Queen-Mapache-Documents-GitHub-clawdbot`).
+/// Mirrors `projName()` in index.html — the two must agree or a rule set
+/// from a row would silently miss the session it was set on.
+fn proj_name(cwd: &str) -> String {
+    let parts: Vec<&str> = cwd.split(['\\', '/']).filter(|s| !s.is_empty()).collect();
+    let last = parts.last().copied().unwrap_or("");
+    let last = if parts.len() <= 1 && last.contains('-') {
+        last.rsplit('-').next().unwrap_or("")
+    } else {
+        last
+    };
+    if last.is_empty() { "(unknown)".to_string() } else { last.to_string() }
+}
+
+/// The name a rule is keyed on: exactly the name its popover row displays.
+/// Mirrors `rowName()` in index.html. Keying on the visible name (rather
+/// than the raw cwd) is what makes both wrinkles disappear — a recovered
+/// session's slug untangles to the same name as its live twin, and a Cowork
+/// row, which has no real path, keys on its title instead.
+fn row_key(title: &str, cwd: &str, surface: Surface) -> String {
+    if !title.is_empty() {
+        return title.to_string();
+    }
+    if !cwd.is_empty() {
+        return proj_name(cwd);
+    }
+    match surface {
+        Surface::Hook => "(unknown)".to_string(),
+        Surface::CoworkCloud | Surface::CoworkLocal => "Cowork session".to_string(),
+    }
+}
+
+fn norm_path(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// Which rule applies to a session. Two keys are accepted: the displayed
+/// row name (what the popover writes) and a full path (an escape hatch for
+/// hand-edited config.json, when two checkouts share a folder name).
+fn filter_of(filters: &HashMap<String, String>, s: &Session) -> Filter {
+    if filters.is_empty() {
+        return Filter::Normal;
+    }
+    if !s.cwd.is_empty() {
+        let want = norm_path(&s.cwd);
+        if let Some(v) = filters.iter().find(|(k, _)| norm_path(k) == want) {
+            return Filter::parse(v.1);
+        }
+    }
+    let key = row_key(&s.title, &s.cwd, s.surface);
+    filters
+        .iter()
+        .find(|(k, _)| k.as_str().eq_ignore_ascii_case(&key))
+        .map(|(_, v)| Filter::parse(v))
+        .unwrap_or(Filter::Normal)
 }
 
 const DETAIL_MAX: usize = 120;
@@ -227,6 +320,9 @@ pub struct SessionInfo {
     pub title: String,
     /// display-case `cse_...` id for the Cowork deep link; empty otherwise
     pub link_id: String,
+    /// `"quiet"` when a rule mutes this row, else empty. `"ignore"` never
+    /// reaches here — those rows are dropped before the list is built.
+    pub filtered: &'static str,
 }
 
 #[derive(Clone, Serialize, PartialEq)]
@@ -240,6 +336,11 @@ pub struct PetStatePayload {
     /// Cowork watcher health for the popover header; empty = fine. Kept
     /// separate from `blind`, which stays the hook pipe's verdict.
     pub cowork_health: String,
+    /// Every active rule, name -> `"quiet"`/`"ignore"`. Carried because an
+    /// ignored project has no row left to clear the rule from: without this
+    /// the settings panel could not show it, and `ignore` would be a
+    /// one-way door out of the UI. BTreeMap for a stable emit comparison.
+    pub filters: BTreeMap<String, String>,
 }
 
 impl PetStatePayload {
@@ -252,6 +353,7 @@ impl PetStatePayload {
             blind: !server_ok,
             sessions: Vec::new(),
             cowork_health: String::new(),
+            filters: BTreeMap::new(),
         }
     }
 
@@ -268,6 +370,7 @@ fn same_display(a: &PetStatePayload, b: &PetStatePayload) -> bool {
             p.n_sessions,
             p.blind,
             p.cowork_health.clone(),
+            p.filters.clone(),
             p.sessions
                 .iter()
                 .map(|s| {
@@ -280,6 +383,7 @@ fn same_display(a: &PetStatePayload, b: &PetStatePayload) -> bool {
                         s.tools.clone(),
                         s.surface,
                         s.title.clone(),
+                        s.filtered,
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -1117,7 +1221,15 @@ fn decay(reg: &mut HashMap<String, Session>) {
 }
 
 fn publish(reg: &HashMap<String, Session>, handle: &AppHandle, blind: Option<&str>, cowork_health: &str) {
-    let payload = reduce(reg, blind, cowork_health);
+    // read live, not cached: a rule set from the popover takes effect on the
+    // next tick (<=1s) with no extra plumbing. try_state, not state: a panic
+    // here would kill the state thread, and a dead state thread is exactly
+    // the silent failure the watchdog exists to prevent.
+    let filters = handle
+        .try_state::<crate::AppState>()
+        .map(|st| st.cfg.lock_or_recover().filters.clone())
+        .unwrap_or_default();
+    let payload = reduce(reg, blind, cowork_health, &filters);
     let store = handle.state::<PetStateStore>();
     let mut cur = store.0.lock_or_recover();
     if same_display(&cur, &payload) {
@@ -1141,11 +1253,25 @@ fn display_name(s: &Session, now: Instant) -> &'static str {
     }
 }
 
-fn reduce(reg: &HashMap<String, Session>, blind_reason: Option<&str>, cowork_health: &str) -> PetStatePayload {
+fn reduce(
+    reg: &HashMap<String, Session>,
+    blind_reason: Option<&str>,
+    cowork_health: &str,
+    filters: &HashMap<String, String>,
+) -> PetStatePayload {
     let now = Instant::now();
-    let mut sessions: Vec<SessionInfo> = reg
+    // ONE predicate, resolved once and used by BOTH the list and the
+    // ranking below. Filtering anywhere else (the frontend keeps its own
+    // POP_RANK copy) would mean two rules that can drift apart; here the
+    // popover and his face cannot disagree about who counts.
+    let kept: Vec<(&String, &Session, Filter)> = reg
         .iter()
-        .map(|(id, s)| SessionInfo {
+        .map(|(id, s)| (id, s, filter_of(filters, s)))
+        .filter(|(_, _, f)| *f != Filter::Ignore)
+        .collect();
+    let mut sessions: Vec<SessionInfo> = kept
+        .iter()
+        .map(|&(id, s, f)| SessionInfo {
             id: id.clone(),
             cwd: s.cwd.clone(),
             state: display_name(s, now).into(),
@@ -1159,6 +1285,7 @@ fn reduce(reg: &HashMap<String, Session>, blind_reason: Option<&str>, cowork_hea
             surface: s.surface.name(),
             title: s.title.clone(),
             link_id: s.link_id.clone(),
+            filtered: f.name(),
         })
         .collect();
     // stable order: HashMap iteration is nondeterministic, and a shuffled
@@ -1166,16 +1293,24 @@ fn reduce(reg: &HashMap<String, Session>, blind_reason: Option<&str>, cowork_hea
     sessions.sort_by(|a, b| a.id.cmp(&b.id));
 
     // worst session wins; ties: the ask you're most overdue on (oldest since)
-    // for needs_input, freshest activity for everything else
-    let top = reg.values().max_by(|a, b| {
-        a.state.rank().cmp(&b.state.rank()).then_with(|| {
-            if a.state == S::NeedsInput {
-                now.duration_since(a.since).cmp(&now.duration_since(b.since))
-            } else {
-                a.last_event_at.cmp(&b.last_event_at)
-            }
-        })
-    });
+    // for needs_input, freshest activity for everything else. Quiet rows are
+    // absent from this fold — that, and nothing else, is what "quiet" means:
+    // they cannot set his state, and the voice speaks only what the fold
+    // returns, so they cannot be spoken or chirped about either.
+    let top = kept
+        .iter()
+        .copied()
+        .filter(|(_, _, f)| *f == Filter::Normal)
+        .map(|(_, s, _)| s)
+        .max_by(|a, b| {
+            a.state.rank().cmp(&b.state.rank()).then_with(|| {
+                if a.state == S::NeedsInput {
+                    now.duration_since(a.since).cmp(&now.duration_since(b.since))
+                } else {
+                    a.last_event_at.cmp(&b.last_event_at)
+                }
+            })
+        });
 
     let (state, detail, kind) = match top {
         None => ("sleeping".to_string(), String::new(), String::new()),
@@ -1195,10 +1330,13 @@ fn reduce(reg: &HashMap<String, Session>, blind_reason: Option<&str>, cowork_hea
         state,
         detail,
         kind,
-        n_sessions: reg.len(),
+        // quiet rows still count (they are still shown); ignored rows never
+        // existed as far as anything downstream is concerned
+        n_sessions: sessions.len(),
         blind,
         sessions,
         cowork_health: cowork_health.to_string(),
+        filters: filters.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
     }
 }
 
@@ -1237,7 +1375,7 @@ mod cowork_tests {
         assert_eq!(s.detail, "Claude est\u{e1} esperando tu respuesta");
         assert_eq!(s.title, "Example Cowork session");
         assert_eq!(s.link_id, SID_DISPLAY);
-        assert_eq!(reduce(&reg, None, "").state, "idle");
+        assert_eq!(reduce(&reg, None, "", &HashMap::new()).state, "idle");
         // a live toast afterwards is a real ask
         apply(&mut reg, &mut cw, &[added(2, &format!("cowork-awaiting-{SID_DISPLAY}"), "", "Permission request", "B")]);
         assert_eq!(reg[SID].state, S::NeedsInput);
@@ -1279,7 +1417,7 @@ mod cowork_tests {
             "Example Cowork session", "Claude está esperando tu respuesta")]);
         assert_eq!(reg.len(), 1);
         assert_eq!((reg[SID].state, reg[SID].kind.as_str()), (S::NeedsInput, "idle_prompt"));
-        let p = reduce(&reg, None, "");
+        let p = reduce(&reg, None, "", &HashMap::new());
         assert_eq!(p.state, "needs_input");
         assert_eq!(p.sessions[0].surface, "cowork");
         assert_eq!(p.sessions[0].link_id, SID_DISPLAY);
@@ -1369,7 +1507,7 @@ mod cowork_tests {
         let s = &reg["local_842d0b96"];
         assert_eq!((s.surface, s.state, s.kind.as_str()), (Surface::CoworkLocal, S::NeedsInput, "elicitation_dialog"));
         assert_eq!(s.title, "Cleanup");
-        assert_eq!(reduce(&reg, None, "").sessions[0].surface, "cowork");
+        assert_eq!(reduce(&reg, None, "", &HashMap::new()).sessions[0].surface, "cowork");
     }
 
     #[test]
@@ -1450,7 +1588,7 @@ mod cowork_tests {
         assert_eq!(cw.blind_reason(), None, "no cloud activity: a header line, not blind");
         apply(&mut reg, &mut cw, &[activity(SID, &["F"])]);
         assert_eq!(cw.blind_reason().as_deref(), Some("Cowork prompts invisible: notification store unreadable: x"));
-        let p = reduce(&reg, cw.blind_reason().as_deref(), &cw.health.summary());
+        let p = reduce(&reg, cw.blind_reason().as_deref(), &cw.health.summary(), &HashMap::new());
         assert_eq!(p.state, "blind");
         assert!(p.blind);
         assert_eq!(p.cowork_health, "notification store unreadable: x");
@@ -1499,7 +1637,7 @@ mod cowork_tests {
         assert_eq!(reg["cli-2"].link_id, "");
         attach_links(&mut reg, &cw);
         assert_eq!(reg["cli-2"].link_id, "local_b");
-        let p = reduce(&reg, None, "");
+        let p = reduce(&reg, None, "", &HashMap::new());
         assert!(p.sessions.iter().all(|s| s.surface == "code" && s.link_id.starts_with("local_")));
     }
 
@@ -1510,8 +1648,147 @@ mod cowork_tests {
         apply(&mut reg, &mut cw, &[activity(SID, &["F"]), added(1, &format!("cowork-idle-{SID_DISPLAY}"), "", "T", "B")]);
         let h = &reg["hook"];
         assert_eq!((h.surface, h.state), (Surface::Hook, S::Working));
-        let p = reduce(&reg, None, "");
+        let p = reduce(&reg, None, "", &HashMap::new());
         let hook = p.sessions.iter().find(|s| s.id == "hook").unwrap();
         assert_eq!((hook.surface, hook.title.as_str(), hook.link_id.as_str()), ("code", "", ""));
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    //! Session filtering: which projects he is allowed to care about.
+    use super::*;
+
+    fn sess(cwd: &str, state: S) -> Session {
+        Session::new(cwd.to_string(), state)
+    }
+
+    /// a Working session with a tool actually open, so `display_name` reads
+    /// "working" rather than the toolless "thinking"
+    fn working(cwd: &str) -> Session {
+        let mut s = Session::new(cwd.to_string(), S::Working);
+        s.open_tools.push(("t1".to_string(), "Bash".to_string()));
+        s
+    }
+
+    fn cowork(title: &str, state: S) -> Session {
+        let mut s = Session::new(String::new(), state);
+        s.surface = Surface::CoworkCloud;
+        s.title = title.to_string();
+        s
+    }
+
+    fn rules(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn proj_name_untangles_a_recovered_slug() {
+        assert_eq!(proj_name("C:\\Users\\Queen Mapache\\Documents\\GitHub\\clawdbot"), "clawdbot");
+        assert_eq!(proj_name("/home/mapache/clawdbot"), "clawdbot");
+        // the wrinkle: a recovered session carries this instead of a path
+        assert_eq!(proj_name("C--Users-Queen-Mapache-Documents-GitHub-clawdbot"), "clawdbot");
+        assert_eq!(proj_name(""), "(unknown)");
+    }
+
+    #[test]
+    fn a_rule_set_on_a_live_row_still_matches_its_recovered_twin() {
+        // the whole point of keying on the displayed name: these two rows
+        // are the same project and must take the same rule
+        let live = sess("C:\\Users\\Queen Mapache\\Documents\\GitHub\\clawdbot", S::Working);
+        let recovered = sess("C--Users-Queen-Mapache-Documents-GitHub-clawdbot", S::Working);
+        let r = rules(&[("clawdbot", "ignore")]);
+        assert_eq!(filter_of(&r, &live), Filter::Ignore);
+        assert_eq!(filter_of(&r, &recovered), Filter::Ignore);
+    }
+
+    #[test]
+    fn cowork_rows_key_on_title_because_they_have_no_path() {
+        let s = cowork("Example Cowork session", S::Working);
+        assert_eq!(filter_of(&rules(&[("Example Cowork session", "quiet")]), &s), Filter::Quiet);
+    }
+
+    #[test]
+    fn a_full_path_rule_separates_two_checkouts_sharing_a_folder_name() {
+        let a = sess("/home/mapache/work/clawdbot", S::Working);
+        let b = sess("/home/mapache/fork/clawdbot", S::Working);
+        let r = rules(&[("/home/mapache/fork/clawdbot", "ignore")]);
+        assert_eq!(filter_of(&r, &a), Filter::Normal);
+        assert_eq!(filter_of(&r, &b), Filter::Ignore);
+    }
+
+    #[test]
+    fn an_unknown_rule_word_never_silently_hides_a_project() {
+        let s = sess("/x/clawdbot", S::Working);
+        assert_eq!(filter_of(&rules(&[("clawdbot", "qiuet")]), &s), Filter::Normal);
+    }
+
+    #[test]
+    fn ignore_is_invisible_and_uncounted() {
+        let mut reg = HashMap::new();
+        reg.insert("a".to_string(), sess("/x/noisy", S::NeedsInput));
+        reg.insert("b".to_string(), working("/x/real"));
+        let p = reduce(&reg, None, "", &rules(&[("noisy", "ignore")]));
+        assert_eq!(p.n_sessions, 1);
+        assert_eq!(p.sessions.len(), 1);
+        assert_eq!(p.sessions[0].cwd, "/x/real");
+        // and it cannot reach the top fold: needs_input outranks working,
+        // so an unfiltered registry would read "needs_input" here
+        assert_eq!(p.state, "working");
+    }
+
+    #[test]
+    fn quiet_is_listed_and_counted_but_never_drives_him() {
+        let mut reg = HashMap::new();
+        reg.insert("a".to_string(), sess("/x/noisy", S::NeedsInput));
+        reg.insert("b".to_string(), working("/x/real"));
+        let p = reduce(&reg, None, "", &rules(&[("noisy", "quiet")]));
+        assert_eq!(p.n_sessions, 2, "quiet rows still count");
+        assert_eq!(p.sessions.len(), 2, "quiet rows are still shown");
+        let q = p.sessions.iter().find(|s| s.cwd == "/x/noisy").unwrap();
+        assert_eq!(q.filtered, "quiet", "the row says so, for the muted styling");
+        assert_eq!(p.state, "working", "but it never wins the fold");
+    }
+
+    #[test]
+    fn a_registry_of_nothing_but_quiet_rows_leaves_him_asleep() {
+        // deliberate, per the design: quiet means he does not react at all,
+        // so with nothing else live there is nothing for him to be
+        let mut reg = HashMap::new();
+        reg.insert("a".to_string(), sess("/x/noisy", S::NeedsInput));
+        let p = reduce(&reg, None, "", &rules(&[("noisy", "quiet")]));
+        assert_eq!(p.state, "sleeping");
+        assert_eq!(p.sessions.len(), 1);
+    }
+
+    #[test]
+    fn no_rules_changes_nothing() {
+        let mut reg = HashMap::new();
+        reg.insert("a".to_string(), sess("/x/one", S::NeedsInput));
+        reg.insert("b".to_string(), working("/x/two"));
+        let p = reduce(&reg, None, "", &HashMap::new());
+        assert_eq!(p.n_sessions, 2);
+        assert_eq!(p.state, "needs_input");
+        assert!(p.sessions.iter().all(|s| s.filtered.is_empty()));
+    }
+
+    #[test]
+    fn the_rule_table_rides_along_so_ignore_stays_reversible() {
+        // an ignored project has no row left to clear the rule from; if the
+        // payload did not carry the table, the UI could not offer the undo
+        let reg = HashMap::new();
+        let p = reduce(&reg, None, "", &rules(&[("gone", "ignore")]));
+        assert!(p.sessions.is_empty());
+        assert_eq!(p.filters.get("gone").map(String::as_str), Some("ignore"));
+    }
+
+    #[test]
+    fn a_rule_change_alone_is_enough_to_re_emit() {
+        // same_display gates every emit; if it ignored the table, toggling a
+        // rule on an empty registry would never reach the webview
+        let reg = HashMap::new();
+        let a = reduce(&reg, None, "", &HashMap::new());
+        let b = reduce(&reg, None, "", &rules(&[("gone", "ignore")]));
+        assert!(!same_display(&a, &b));
     }
 }

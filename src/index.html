@@ -87,6 +87,27 @@
   #popover .proj { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #popover .st { color: #b9b2ab; flex: none; }
   #popover .age { color: #8a857f; margin-left: auto; flex: none; }
+  /* Per-row attention control. Reserved with visibility (never display), so
+     revealing it on hover cannot reflow the row — a resize under a motionless
+     cursor would move the thing being aimed at and invalidate reportBounds. */
+  #popover .fbtn {
+    flex: none; visibility: hidden; font: inherit; font-size: 10px; line-height: 1;
+    padding: 2px 5px; margin-left: 4px; border-radius: 5px; cursor: pointer;
+    background: #3a3530; color: #b9b2ab; border: 1px solid #4a443d;
+  }
+  #popover .sess:hover .fbtn { visibility: visible; }
+  #popover .fbtn:hover { background: #4a443d; color: #efe7dd; }
+  /* a quiet row stays legible but plainly stood-down, and keeps its control
+     visible so the state is never a mystery you have to hover to discover */
+  #popover .sess.quiet { opacity: .55; }
+  #popover .sess.quiet .fbtn { visibility: visible; background: #4a3a30; border-color: #6b5140; }
+  body.panels-light #popover .fbtn { background: #e7e0d8; color: #6f6862; border-color: #c9beb4; }
+  body.panels-light #popover .fbtn:hover { background: #d8cfc4; color: #3b3630; }
+  body.panels-light #popover .sess.quiet .fbtn { background: #efdccf; border-color: #d3b49f; }
+  /* the rule list: the only way back from `ignore`, whose rows are gone */
+  #popover .frule { display: inline-flex; align-items: center; gap: 4px; }
+  #popover .frule .x { opacity: .6; font-weight: 700; }
+  #popover .frule:hover .x { opacity: 1; }
   #popover .detail {
     color: #a29c95; margin: 2px 0 0 14px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -274,6 +295,13 @@
       <button data-tone="rate" data-step="0.1">+</button>
     </span>
   </div>
+  <!-- Active attention rules, one chip each. Rebuilt only when the rule set
+       actually changes (see renderFilterRow) — never on a pipeline tick, per
+       the static-skeleton rule. An `ignore` rule has no session row left to
+       clear it from, so without this the hide would be a one-way door. -->
+  <div id="filter-row" class="theme-row" hidden>
+    <span class="lbl">rules:</span>
+  </div>
   <div id="pop-sessions"></div>
 </div>
 <div id="bubble" hidden></div>
@@ -452,6 +480,7 @@
   const artRow = document.getElementById('art-row');
   const voiceRow = document.getElementById('voice-row');
   const gearBtn = document.getElementById('gearbtn');
+  const filterRow = document.getElementById('filter-row');
 
   let panelTheme = 'system';
   try { panelTheme = localStorage.getItem('panelTheme') || 'system'; } catch {}
@@ -483,6 +512,8 @@
     voiceRow.hidden = !show;
     voicePickRow.hidden = !show;
     toneRow.hidden = !show;
+    // an empty rules row would be a bare "rules:" label with nothing after it
+    filterRow.hidden = !show || !Object.keys(currentFilters()).length;
     reportBounds();
   };
   themeRow.querySelectorAll('button[data-theme]').forEach((b) => {
@@ -619,6 +650,74 @@
     };
   });
 
+  // --- session filtering: which projects he is allowed to care about.
+  //     The rule table lives in Rust (it is the reducer that applies it);
+  //     these are just its mirror and its editor. Keyed on the row's
+  //     displayed name, which is exactly what state::row_key matches on. ---
+  const FILTER_NEXT = { '': 'quiet', quiet: 'ignore', ignore: '' };
+  const FILTER_DOES = {
+    '': 'mute — keep listing it, but he stops reacting to it',
+    quiet: 'hide — drop it entirely; undo from the gear',
+    ignore: 'show it again',
+  };
+
+  function currentFilters() {
+    return (lastPipeline && lastPipeline.filters) || {};
+  }
+  // case-insensitive, matching the Rust side's eq_ignore_ascii_case
+  function filterOf(name) {
+    const f = currentFilters();
+    const hit = Object.keys(f).find((k) => k.toLowerCase() === String(name).toLowerCase());
+    return hit ? f[hit] : '';
+  }
+
+  function setFilter(name, mode) {
+    if (!name) return;
+    if (IS_TAURI) invoke('set_session_filter', { name, mode });
+    // Optimistic: the reducer republishes within a tick, but a hidden row
+    // must disappear on the click that hid it, not a second later.
+    if (lastPipeline) {
+      const f = { ...currentFilters() };
+      Object.keys(f).forEach((k) => { if (k.toLowerCase() === name.toLowerCase()) delete f[k]; });
+      if (mode) f[name] = mode;
+      lastPipeline = { ...lastPipeline, filters: f };
+      if (mode === 'ignore') {
+        const kept = lastPipeline.sessions.filter((s) => rowName(s).toLowerCase() !== name.toLowerCase());
+        lastPipeline = { ...lastPipeline, sessions: kept, n_sessions: kept.length };
+      }
+    }
+    renderPopover();
+    renderFilterRow(true);
+    reportBounds(); // the panel just changed height
+  }
+
+  // Rebuilt only when the rule set actually changed: a rebuild under a
+  // motionless cursor loses hover and can swallow the next click.
+  let filterRowSig = null;
+  function renderFilterRow(force) {
+    const f = currentFilters();
+    const names = Object.keys(f).sort();
+    const sig = names.map((n) => n + '=' + f[n]).join('\u0000');
+    if (!force && sig === filterRowSig) return;
+    filterRowSig = sig;
+    // the label is the skeleton; only the chips after it are rebuilt
+    filterRow.querySelectorAll('.frule').forEach((el) => el.remove());
+    for (const n of names) {
+      const b = document.createElement('button');
+      b.className = 'frule';
+      b.title = 'stop ' + (f[n] === 'ignore' ? 'hiding' : 'muting') + ' ' + n;
+      const lbl = document.createElement('span');
+      lbl.textContent = (f[n] === 'ignore' ? 'hidden: ' : 'muted: ') + n;
+      const x = document.createElement('span');
+      x.className = 'x';
+      x.textContent = '\u00d7';
+      b.append(lbl, x);
+      b.onclick = (e) => { e.stopPropagation(); setFilter(n, ''); };
+      filterRow.appendChild(b);
+    }
+    if (!names.length) filterRow.hidden = true;
+  }
+
   const POP_RANK = { needs_input: 6, error: 5, working: 3, thinking: 3, done: 2, idle: 1 };
   const POP_COLOR = {
     needs_input: '#e89478', error: '#7d7d92', working: '#c1694f',
@@ -672,7 +771,7 @@
       (POP_RANK[b.state] || 0) - (POP_RANK[a.state] || 0) || a.since_ms - b.since_ms);
     for (const s of rows) {
       const row = document.createElement('div');
-      row.className = 'sess';
+      row.className = 'sess' + (s.filtered === 'quiet' ? ' quiet' : '');
       row.title = 'open this session in the Claude app';
       row.onclick = () => openLink(sessionLink(s));
       const top = document.createElement('div');
@@ -699,6 +798,16 @@
         top.appendChild(pill);
       }
       top.append(st, age);
+      // the attention control: cycles care -> quiet -> hidden. It must not
+      // also open the session, hence the stopPropagation.
+      const name = rowName(s);
+      const mode = s.filtered || filterOf(name);
+      const fb = document.createElement('button');
+      fb.className = 'fbtn';
+      fb.textContent = mode === 'quiet' ? 'muted' : 'mute';
+      fb.title = FILTER_DOES[mode] || FILTER_DOES[''];
+      fb.onclick = (e) => { e.stopPropagation(); setFilter(name, FILTER_NEXT[mode] ?? 'quiet'); };
+      top.appendChild(fb);
       row.appendChild(top);
       if (s.detail) {
         const d = document.createElement('div');
@@ -743,7 +852,7 @@
     if (popEl.hidden === !open) return;
     popEl.hidden = !open;
     if (open) { positionPopover(); renderPopover(); btnsEl.hidden = true; }
-    else { themeRow.hidden = true; artRow.hidden = true; voiceRow.hidden = true; voicePickRow.hidden = true; toneRow.hidden = true; } // reopening always starts on the session list
+    else { themeRow.hidden = true; artRow.hidden = true; voiceRow.hidden = true; voicePickRow.hidden = true; toneRow.hidden = true; filterRow.hidden = true; } // reopening always starts on the session list
     updateBubble();
     reportBounds();
   }
@@ -1027,6 +1136,9 @@
     lastPipeline = p;
     lastPipelineAt = Date.now();
     maybeSpeak(prev, p);
+    // rules can change from outside this window (a hand-edited config.json),
+    // so the chips follow the payload, not only local clicks
+    renderFilterRow();
     renderPopover(); // no-op while hidden
     updateBubble();
     // the bubble/popover just changed shape: without this the OS hit region

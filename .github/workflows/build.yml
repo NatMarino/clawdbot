@@ -37,3 +37,12 @@ jobs:
           name: clawdbot-exe
           path: src-tauri/target/release/clawdbot.exe
           if-no-files-found: error
+
+      # Runs AFTER the upload on purpose: a red test still leaves a
+      # downloadable exe to bisect against, instead of failing the run with
+      # nothing to show for it. The reducer's tables (Cowork transitions,
+      # session filtering) are pure functions with no Windows dependency —
+      # this is the only place they are ever executed.
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test

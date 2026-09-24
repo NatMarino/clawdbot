@@ -72,7 +72,7 @@ struct OpaqueBounds {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct PetConfig {
+pub(crate) struct PetConfig {
     /// window position, physical px (what outer_position reports)
     x: Option<i32>,
     y: Option<i32>,
@@ -80,11 +80,17 @@ struct PetConfig {
     /// Cowork watchers (absent in older configs = defaults, all on)
     #[serde(default)]
     cowork: cowork::CoworkConfig,
+    /// Per-project attention rules, keyed on the name the popover row shows
+    /// (see `state::row_key`): `"quiet"` = listed and counted but never
+    /// drives his state or his voice; `"ignore"` = dropped outright. Absent
+    /// in older configs = no rules, everything counts.
+    #[serde(default)]
+    pub(crate) filters: std::collections::HashMap<String, String>,
 }
 
 impl Default for PetConfig {
     fn default() -> Self {
-        Self { x: None, y: None, scale: 1.75, cowork: Default::default() }
+        Self { x: None, y: None, scale: 1.75, cowork: Default::default(), filters: Default::default() }
     }
 }
 
@@ -127,9 +133,9 @@ struct DragGrab {
     dy: f64,
 }
 
-struct AppState {
+pub(crate) struct AppState {
     bounds: Mutex<OpaqueBounds>,
-    cfg: Mutex<PetConfig>,
+    pub(crate) cfg: Mutex<PetConfig>,
     dirty: AtomicBool,
     drag: Mutex<Option<DragGrab>>,
 }
@@ -273,6 +279,34 @@ fn get_pet_scale(state: tauri::State<AppState>) -> f64 {
     state.cfg.lock_or_recover().scale
 }
 
+/// Set or clear a project's attention rule. `mode` is `"quiet"`, `"ignore"`,
+/// or anything else to clear it (the frontend sends `""`).
+///
+/// `name` is the popover row's displayed name, which is what `state::row_key`
+/// matches on — so the thing Nat clicks and the thing the reducer tests are
+/// the same string by construction.
+///
+/// Takes effect on the state thread's next tick (<=1s); persisted by the
+/// existing debounced saver rather than written here, so a burst of clicks
+/// costs one file write.
+#[tauri::command]
+fn set_session_filter(state: tauri::State<AppState>, name: String, mode: String) {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    let mut cfg = state.cfg.lock_or_recover();
+    match mode.as_str() {
+        "quiet" | "ignore" => {
+            cfg.filters.insert(name, mode);
+        }
+        _ => {
+            cfg.filters.remove(&name);
+        }
+    }
+    state.dirty.store(true, Ordering::Relaxed);
+}
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -320,7 +354,7 @@ fn main() {
             dirty: AtomicBool::new(false),
             drag: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![set_opaque_bounds, start_drag, end_drag, set_pet_scale, get_pet_scale, quit_app, open_new_code_session, open_claude_link, state::get_pet_state])
+        .invoke_handler(tauri::generate_handler![set_opaque_bounds, start_drag, end_drag, set_pet_scale, get_pet_scale, set_session_filter, quit_app, open_new_code_session, open_claude_link, state::get_pet_state])
         .setup(move |app| {
             // event pipeline: hook server thread -> mpsc -> state thread.
             // A failed bind never exits and never moves ports (the installed
