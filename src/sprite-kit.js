@@ -84,6 +84,18 @@ const tear = (grid, row, col) => {
   return out.map((r) => r.join(''));
 };
 const mirrorPose = (rows) => rows.map((r) => r.split('').reverse().join(''));
+// A solid rectangle stamped into a composed grid. The buddy has no mouth in
+// the approved vocabulary — he is all eyes — so this exists for the EATING
+// clip alone, where the chewing has to read as a mouth rather than as the
+// eyes doing the chomping. Nothing else should grow a mouth.
+const block = (grid, row, col, w, h, ch = 'E') => {
+  const out = grid.map((r) => r.split(''));
+  for (let r = 0; r < h; r++) {
+    if (!out[row + r]) continue;
+    for (let c = 0; c < w; c++) if (col + c < out[row + r].length) out[row + r][col + c] = ch;
+  }
+  return out.map((r) => r.join(''));
+};
 
 // Load-time validation: a malformed frame must fail loudly, not render garbage.
 // Staged clips carry self-sized frames (any dims, uniform rows); flat clips
@@ -111,4 +123,4 @@ function validateClips(clips, spriteW, spriteH) {
   }
 }
 
-export { PALETTES, GLYPHS, stamp, dbl, slitEyes, archEyes, sadEyes, tear, mirrorPose, validateClips };
+export { PALETTES, GLYPHS, stamp, dbl, slitEyes, archEyes, sadEyes, tear, mirrorPose, block, validateClips };

@@ -33,6 +33,16 @@ const MOTIONS = {
   hopOnce: (t) => ({ dx: 0, dy: t < 0.55 ? -Math.round(Math.sin((t / 0.55) * Math.PI) * 8) : 0 }),
 };
 
+// Talking: a small vertical bob added ON TOP of whatever the clip is already
+// doing, for as long as an utterance is playing. It is not a clip of its own
+// because he talks *while* hopping for input or drooping over an error — the
+// point is to tie the voice to the body, so you can tell the sound is him.
+// ~3.2Hz is a shade under syllable rate: enough to read as speech, slow
+// enough not to look like a vibration. Bottom-anchored frames mean the +1
+// half of the cycle sinks his feet a touch, which reads as a squash.
+const TALK_HZ = 3.2;
+const talkBob = (secs) => Math.round(Math.sin(secs * TALK_HZ * Math.PI * 2));
+
 // Idle nap cadence: after a random 3-8 min of uninterrupted idle the buddy
 // falls asleep; the nap ends on its own after 45s-2min. A click or drag
 // wakes it early. Deliberately much rarer than the old soccer interlude.
@@ -52,6 +62,8 @@ export class Pet {
     this._sleepTimer = null;
     this._wakeTimer = null;
     this._napMs = 0;
+    this.speaking = false;   // an utterance is playing: bob while it does
+    this._speakSince = 0;
     this._armSleep(); // initial state is idle
     // error-state glitch: random tear-into-bands moments (see _raf)
     this._glitch = { nextAt: 0, until: 0, bands: [0, 0, 0], grey: false };
@@ -98,6 +110,15 @@ export class Pet {
     this._outro = null;
     if (!next.clips[this.state]) this._apply('idle', null);
     this._emit('style', name);
+  }
+
+  // Host tells the engine when he is actually making a noise. Restarting the
+  // clock on each utterance keeps the bob starting from rest rather than
+  // picking up mid-cycle.
+  setSpeaking(on) {
+    if (!!on === this.speaking) return;
+    this.speaking = !!on;
+    this._speakSince = performance.now();
   }
 
   setState(state, detail = null) {
@@ -267,7 +288,9 @@ export class Pet {
     const palette = PALETTES[glitch && glitch.grey ? 'grey' : cur.palette];
 
     const m = (MOTIONS[cur.motion] || MOTIONS.none)(t);
-    const dx = m.dx + cur.fdx, dy = m.dy + cur.fdy;
+    const dx = m.dx + cur.fdx;
+    let dy = m.dy + cur.fdy;
+    if (this.speaking) dy += talkBob((performance.now() - this._speakSince) / 1000);
 
     // cell size shrinks with frame resolution (the app's staged clips use
     // res 2 = half-cell art at 4 units per cell). The sprite is anchored by

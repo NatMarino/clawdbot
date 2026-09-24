@@ -214,6 +214,21 @@ function lineFor(state, kind, name, detail, forceGreeting) {
 
 // --- backends ---------------------------------------------------------
 
+// The host listens so the body can bob while he talks (pet.setSpeaking).
+// A plain callback rather than events: there is exactly one listener.
+let speakingListener = null;
+let speakingOffTimer = null;
+function onSpeaking(fn) { speakingListener = fn; }
+function setSpeaking(on) {
+  clearTimeout(speakingOffTimer);
+  if (speakingListener) speakingListener(!!on);
+}
+// the chirp has no onend of its own, so it books its own silence
+function speakingFor(ms) {
+  setSpeaking(true);
+  speakingOffTimer = setTimeout(() => { if (speakingListener) speakingListener(false); }, ms);
+}
+
 const systemBackend = {
   name: 'system',
   async ready() { return typeof window.speechSynthesis !== 'undefined'; },
@@ -241,10 +256,14 @@ const systemBackend = {
     u.volume = settings.volume;
     u.rate = settings.rate;
     u.pitch = settings.pitch;
+    // the body bobs for exactly as long as the mouth is going
+    u.onstart = () => setSpeaking(true);
+    u.onend = () => setSpeaking(false);
+    u.onerror = () => setSpeaking(false);
     speechSynthesis.cancel(); // an alert supersedes whatever was mid-sentence
     speechSynthesis.speak(u);
   },
-  stop() { try { speechSynthesis.cancel(); } catch {} },
+  stop() { try { speechSynthesis.cancel(); } catch {} setSpeaking(false); },
 };
 
 // eSpeak NG (WebAssembly). Lazily loaded on first use, never at boot — alerts
@@ -321,6 +340,7 @@ function chirp(count = 3, shape = 'up') {
     osc.stop(t + 0.09);
     t += 0.055;
   }
+  speakingFor(count * 55 + 120); // bob along with the blips
   return true;
 }
 
@@ -382,6 +402,6 @@ async function finished({ name, busyMs } = {}) {
 }
 
 export {
-  alert, finished, chirp, say, warm, stop, get, set, nudge,
+  alert, finished, chirp, say, warm, stop, get, set, nudge, onSpeaking,
   lineFor, phraseAsk, sanitise, systemBackend, DEFAULTS, LIMITS,
 };

@@ -120,9 +120,19 @@ const HOP_NORMAL  = rows(eyesArch(body()));
 const HOP_SQUASH  = rows(eyesArch(body({ sink: 8, legH: 0 }), { sink: 8 }));
 const HOP_ARMSUP  = rows(eyesArch(body({ nubs: 'none', bars: ['L', 'R'] })));
 const WAVE_UP     = rows(eyesArch(body({ nubs: 'left', bars: ['R'] })));
-// eating pose: leaned down onto the treat with the eyes open. The bite is
-// HOP_SQUASH (tucked, happy squint), same as the app skin.
-const EAT_DOWN = rows(eyesOpen(body({ sink: 8, legH: 0 }), { sink: 8 }));
+// eating: the one clip with a MOUTH. Everywhere else he is all eyes, but a
+// chew has to read as a mouth chewing rather than as the eyes chomping (see
+// sprites.js). This head has room to spare below the eye box — eyes end at
+// row 31 and the head runs to 47 — so nothing has to move.
+const MOUTH_Y = 38, MOUTH_CX = HEAD_X + HEAD_W / 2; // 32, the head's centre
+const eatMouth = (open) => {
+  const g = eyesOpen(body({ sink: 8, legH: 0 }), { sink: 8 });
+  if (open) put(g, MOUTH_CX - 8, MOUTH_Y - 2, 16, 7, 'E');
+  else put(g, MOUTH_CX - 4, MOUTH_Y + 1, 8, 2, 'E');
+  return rows(g);
+};
+const EAT_DOWN = eatMouth(false); // lips together
+const EAT_BITE = eatMouth(true);  // mouth open, chomping
 
 // --- working, home frames: the wind-up dance and the landing, drawn on the
 // CLI body from the app's measured poses (sprites.js WORK_*). Arm blocks
@@ -421,11 +431,11 @@ const CLIPS_CLI = {
       intro: [
         { frame: IDLE_SIDE,  dx: 0, dy: 0, ms: 200 },
         { frame: EAT_DOWN,   dx: 0, dy: 0, ms: 133 },
-        { frame: HOP_SQUASH, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_BITE,   dx: 0, dy: 0, ms: 100 },
         { frame: EAT_DOWN,   dx: 0, dy: 0, ms: 67 },
-        { frame: HOP_SQUASH, dx: 0, dy: 0, ms: 100 },
+        { frame: EAT_BITE,   dx: 0, dy: 0, ms: 100 },
         { frame: EAT_DOWN,   dx: 0, dy: 0, ms: 67 },
-        { frame: HOP_SQUASH, dx: 0, dy: 0, ms: 133 },
+        { frame: EAT_BITE,   dx: 0, dy: 0, ms: 133 },
       ],
       loop: [
         { frame: HOP_ARMSUP, dx: 0, dy: 0, ms: 267 },
