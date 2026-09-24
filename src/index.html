@@ -244,6 +244,18 @@
     <button data-art="app">app</button>
     <button data-art="cli">cli</button>
   </div>
+  <div id="voice-row" class="theme-row" hidden>
+    <span class="lbl">voice:</span>
+    <button data-voice="on">on</button>
+    <button data-voice="off">off</button>
+    <button id="voice-detail" title="also read the ask itself, not just the opener">+ask</button>
+    <button id="voice-test" title="hear it now">test</button>
+  </div>
+  <!-- one button per installed English voice, filled in once at startup
+       (never re-rendered — see the skeleton note above) -->
+  <div id="voice-pick" class="theme-row" hidden>
+    <span class="lbl">who:</span>
+  </div>
   <div id="pop-sessions"></div>
 </div>
 <div id="bubble" hidden></div>
@@ -269,6 +281,7 @@
   import { Pet } from './pet.js';
   import { STYLES } from './styles.js';
   import { TreatSprite, FALL_MS } from './treats.js';
+  import * as voice from './voice.js';
 
   const IS_TAURI = !!window.__TAURI__;
   const invoke = IS_TAURI ? window.__TAURI__.core.invoke : null;
@@ -419,6 +432,7 @@
   const popSessions = document.getElementById('pop-sessions');
   const themeRow = document.getElementById('theme-row');
   const artRow = document.getElementById('art-row');
+  const voiceRow = document.getElementById('voice-row');
   const gearBtn = document.getElementById('gearbtn');
 
   let panelTheme = 'system';
@@ -448,6 +462,8 @@
     const show = themeRow.hidden;
     themeRow.hidden = !show;
     artRow.hidden = !show;
+    voiceRow.hidden = !show;
+    voicePickRow.hidden = !show;
     reportBounds();
   };
   themeRow.querySelectorAll('button[data-theme]').forEach((b) => {
@@ -475,6 +491,80 @@
   artRow.querySelectorAll('button[data-art]').forEach((b) => {
     b.onclick = (e) => { e.stopPropagation(); setArtStyle(b.dataset.art); };
   });
+
+  // --- voice row: he says the ask out loud on needs_input and error ---
+  const voiceDetailBtn = document.getElementById('voice-detail');
+  function syncVoiceButtons() {
+    const v = voice.get();
+    voiceRow.querySelectorAll('button[data-voice]').forEach((b) => {
+      b.classList.toggle('active', (b.dataset.voice === 'on') === !!v.enabled);
+    });
+    voiceDetailBtn.classList.toggle('active', !!v.speakDetail);
+  }
+  syncVoiceButtons();
+  voiceRow.querySelectorAll('button[data-voice]').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      const on = b.dataset.voice === 'on';
+      voice.set({ enabled: on });
+      if (on) voice.warm(); else voice.stop(); // pay the load cost here, not on the first real alert
+      syncVoiceButtons();
+    };
+  });
+  voiceDetailBtn.onclick = (e) => {
+    e.stopPropagation();
+    voice.set({ speakDetail: !voice.get().speakDetail });
+    syncVoiceButtons();
+  };
+  function sampleLine() {
+    const top = lastPipeline ? topSession(lastPipeline) : null;
+    return voice.lineFor('needs_input', 'elicitation', top ? rowName(top) : 'Claw’d',
+      'This is what I sound like when Claude needs you.');
+  }
+  document.getElementById('voice-test').onclick = (e) => {
+    e.stopPropagation();
+    voice.say(sampleLine());
+  };
+
+  // --- voice picker: one button per installed English voice. Clicking one
+  //     selects it AND speaks a sample, so you choose by ear rather than by
+  //     name. Built ONCE, when the voice list first arrives (it loads async
+  //     in Chromium), never re-rendered — a rebuilt button under a still
+  //     cursor loses hover and eats the next click.
+  const voicePickRow = document.getElementById('voice-pick');
+  let voicePickBuilt = false;
+  // "Microsoft David - English (United States)" -> "David"
+  const shortVoiceName = (n) => n.replace(/^Microsoft\s+/i, '').replace(/\s*[-–(].*$/, '').trim() || n;
+  function syncVoicePick() {
+    const want = voice.get().voiceName;
+    voicePickRow.querySelectorAll('button[data-voice-name]').forEach((b) => {
+      b.classList.toggle('active', b.dataset.voiceName === want);
+    });
+  }
+  function buildVoicePick() {
+    const list = voice.systemBackend.voices();
+    if (voicePickBuilt || !list.length) return;
+    voicePickBuilt = true;
+    list.slice(0, 5).forEach((v) => {
+      const b = document.createElement('button');
+      b.dataset.voiceName = v.name;
+      b.textContent = shortVoiceName(v.name);
+      b.title = v.name;
+      b.onclick = (e) => {
+        e.stopPropagation();
+        voice.set({ voiceName: v.name });
+        syncVoicePick();
+        voice.say(sampleLine()); // hear it the moment you pick it
+      };
+      voicePickRow.appendChild(b);
+    });
+    syncVoicePick();
+    reportBounds(); // the panel just got a row taller
+  }
+  buildVoicePick();
+  if (typeof speechSynthesis !== 'undefined') {
+    speechSynthesis.addEventListener('voiceschanged', buildVoicePick);
+  }
 
   const POP_RANK = { needs_input: 6, error: 5, working: 3, thinking: 3, done: 2, idle: 1 };
   const POP_COLOR = {
@@ -600,7 +690,7 @@
     if (popEl.hidden === !open) return;
     popEl.hidden = !open;
     if (open) { positionPopover(); renderPopover(); btnsEl.hidden = true; }
-    else { themeRow.hidden = true; artRow.hidden = true; } // reopening always starts on the session list
+    else { themeRow.hidden = true; artRow.hidden = true; voiceRow.hidden = true; voicePickRow.hidden = true; } // reopening always starts on the session list
     updateBubble();
     reportBounds();
   }
@@ -623,6 +713,14 @@
   // a row's display name: the session title when the source knows one
   // (Cowork toasts carry it), else the project folder (a Cowork row's cwd
   // is its first granted folder name)
+  // the session that names an alert: highest priority, oldest first — the
+  // same sort the popover lists by, so the bubble and the voice always agree
+  function topSession(p) {
+    if (!p || !p.sessions || !p.sessions.length) return null;
+    return [...p.sessions].sort((a, b) =>
+      (POP_RANK[b.state] || 0) - (POP_RANK[a.state] || 0) || a.since_ms - b.since_ms)[0];
+  }
+
   function rowName(s) {
     if (s.title) return s.title;
     if (s.cwd) return projName(s.cwd);
@@ -666,10 +764,7 @@
     bubEl.hidden = !show;
     if (!show) return;
     btnsEl.hidden = true; // the bubble owns the spot below the buddy
-    // the top session (same priority sort as the popover) names the project
-    const rows = [...p.sessions].sort((a, b) =>
-      (POP_RANK[b.state] || 0) - (POP_RANK[a.state] || 0) || a.since_ms - b.since_ms);
-    const top = rows[0];
+    const top = topSession(p);
     bubEl.dataset.link = top ? sessionLink(top) : '';
     bubEl.classList.toggle('err', p.state === 'error');
     bubEl.textContent = '';
@@ -836,9 +931,35 @@
   // --- pipeline truth (Tauri): the last state received from the Rust
   //     reducer. The greeting and any local flourish always return here. ---
   let lastPipeline = null;
+  // Nothing is spoken until the boot wave has handed off: a pet that
+  // announces itself at every launch gets muted by week two, and the very
+  // first payload would otherwise always look like a fresh transition.
+  let voiceArmed = false;
+
+  // Speak only on a genuine transition INTO an alert state. Compared on the
+  // (state, kind) PAIR, because consecutive payloads can share a state while
+  // the kind changes (idle_prompt -> permission on the same session).
+  // This comparison is also what makes the meal safe: endMeal() re-applies
+  // the unchanged lastPipeline, which is not a transition, so he doesn't
+  // re-announce the same ask after every treat.
+  function maybeSpeak(prev, p) {
+    if (!voiceArmed || !p) return;
+    if (p.state !== 'needs_input' && p.state !== 'error') return;
+    if (prev && prev.state === p.state && prev.kind === p.kind) return;
+    const top = topSession(p);
+    voice.alert({
+      state: p.state,
+      kind: p.kind,
+      name: top ? rowName(top) : '',
+      detail: p.detail,
+    });
+  }
   function recordPipeline(p) {
+    const prev = lastPipeline; // captured before the overwrite: the only
+    // record of what he was doing a moment ago
     lastPipeline = p;
     lastPipelineAt = Date.now();
+    maybeSpeak(prev, p);
     renderPopover(); // no-op while hidden
     updateBubble();
     // the bubble/popover just changed shape: without this the OS hit region
@@ -949,6 +1070,11 @@
   // (guard: skip the handoff if something else changed the state meanwhile)
   setState('wave');
   setTimeout(() => {
+    // armed first, before any of the early returns below, so the voice comes
+    // alive on every boot path. Re-applying the pending payload on the next
+    // line is not a transition (prev is that same payload), so the handoff
+    // itself stays silent.
+    voiceArmed = true;
     if (pet.state !== 'wave') return;
     if (!IS_TAURI) { setState('idle'); return; }
     if (lastPipeline) applyPipeline(lastPipeline);
@@ -1005,7 +1131,7 @@
   // debug/test handle
   // debug/test handle. applyPipeline is exposed so the browser demo can drive
   // a real reducer payload (bubble, popover, state) without a Rust host.
-  window.__clawdbot = { pet, setState, setStyle: setArtStyle, setPopover, renderPopover, feed, treatLayer, applyPipeline, get treats() { return treats; }, get lastPipeline() { return lastPipeline; } };
+  window.__clawdbot = { pet, setState, setStyle: setArtStyle, setPopover, renderPopover, feed, treatLayer, applyPipeline, voice, get treats() { return treats; }, get lastPipeline() { return lastPipeline; } };
 </script>
 </body>
 </html>
