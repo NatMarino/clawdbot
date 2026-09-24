@@ -411,6 +411,15 @@ fn main() {
             let poller_win = win.clone();
             let handle = app.handle().clone();
             std::thread::spawn(move || {
+                // Poll fast when it can matter and back off when it plainly
+                // cannot: each tick is two IPC round-trips, and this thread
+                // alone was ~8% of a core continuously. A cursor further than
+                // FAR_PX from the hit region cannot reach it inside SLOW_TICK
+                // without a deliberate flick, and the worst case is one late
+                // hover frame.
+                const FAST_TICK: u64 = 16;
+                const SLOW_TICK: u64 = 50;
+                const FAR_PX: f64 = 320.0;
                 let mut ignoring = false;
                 let mut hover_sent: Option<bool> = None;
                 let mut inside = true; // on an API failure the last verdict stands
@@ -418,6 +427,7 @@ fn main() {
                 let mut drag_env: Option<(Vec<tauri::Monitor>, f64)> = None;
                 let mut last_target: Option<(i32, i32)> = None;
                 loop {
+                    let mut far = false; // cursor nowhere near: safe to idle the poll
                     let state = handle.state::<AppState>();
                     let sample = (|| {
                         let cursor = handle.cursor_position().ok()?; // physical, global
@@ -459,6 +469,10 @@ fn main() {
                                 && cursor.x < bx + b.w
                                 && cursor.y >= by
                                 && cursor.y < by + b.h;
+                            // gap to the rect on each axis, 0 when overlapping
+                            let gx = (bx - cursor.x).max(cursor.x - (bx + b.w)).max(0.0);
+                            let gy = (by - cursor.y).max(cursor.y - (by + b.h)).max(0.0);
+                            far = !inside && gx.max(gy) > FAR_PX;
                         }
                     }
 
@@ -475,7 +489,7 @@ fn main() {
                         use tauri::Emitter;
                         let _ = handle.emit_to("pet", "pet-hover", inside);
                     }
-                    std::thread::sleep(Duration::from_millis(16));
+                    std::thread::sleep(Duration::from_millis(if far { SLOW_TICK } else { FAST_TICK }));
                 }
             });
             Ok(())

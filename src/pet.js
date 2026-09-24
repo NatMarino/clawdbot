@@ -58,6 +58,22 @@ const TALK_SQUASH = 12 / 84;
 const talkSquash = (secs) =>
   TALK_PATTERN[Math.floor(secs * 1000 / TALK_STEP_MS) % TALK_PATTERN.length] ? TALK_SQUASH : 0;
 
+// How much of the overlay's animation state has to go into the repaint key.
+// The glyph overlays step slowly or not at all, so they gate well. The rain
+// and the dream cloud drift continuously and settle for a 20Hz tick: the
+// fastest thing either actually does is the dream's mini-scene stepping on
+// the working clip's 67ms frames, so 20Hz loses nothing visible and costs a
+// third of what 60 did. Sleeping is a long state — it is worth the third.
+const SOFT_HZ = 20;
+function overlayPhase(kind, t) {
+  switch (kind) {
+    case 'dots': return Math.floor(t * 2);   // three-dot cycle, twice a second
+    case 'rain': return Math.floor(t * SOFT_HZ);
+    case 'dream': return Math.floor(t * SOFT_HZ); // covers the wake lift and poof
+    default: return 0;                       // null, and the static question mark
+  }
+}
+
 // Squash the BODY by `frac` of its own height while the feet stay exactly
 // where they are. An offset on the whole sprite (what this used to be) makes
 // him hover; what reads as a soft body is the silhouette getting shorter
@@ -158,6 +174,8 @@ export class Pet {
     this.speaking = false;   // an utterance is playing: bob while it does
     this._speakSince = 0;
     this.squint = false;     // chirping: scrunch the eyes while it sounds
+    this._lastFrame = null;  // repaint gating: what is currently on the canvas
+    this._lastSig = null;
     this._armSleep(); // initial state is idle
     // error-state glitch: random tear-into-bands moments (see _raf)
     this._glitch = { nextAt: 0, until: 0, bands: [0, 0, 0], grey: false };
@@ -191,6 +209,7 @@ export class Pet {
     this.canvas.style.height = (UNIT_H * this.scale) + 'px';
     this.ctx = this.canvas.getContext('2d');
     this.ctx.imageSmoothingEnabled = false;
+    this._lastSig = null; // resizing blanks the canvas: the repaint key is stale
     this._emit('scale', this.scale);
   }
 
@@ -202,6 +221,7 @@ export class Pet {
     if (!next || next === this.style) return;
     this.style = next;
     this._outro = null;
+    this._lastSig = null;
     if (!next.clips[this.state]) this._apply('idle', null);
     this._emit('style', name);
   }
@@ -359,7 +379,6 @@ export class Pet {
     const cur = this._currentFrame();
     const t = this._clipTime();
     const ctx = this.ctx;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
     // error-state glitch: every 1.5-5s the sprite tears into three offset
     // bands for ~100-150ms, occasionally flashing the grey palette —
@@ -400,6 +419,23 @@ export class Pet {
     const unitCell = this.style.cell / res;
     const base = this.restBounds();
     const ox = base.x + dx, oy = this.style.ground - rows * unitCell + dy;
+
+    // Repaint only when the picture actually changes. The clips are slow —
+    // idle runs at fps 2, sleeping at 1 — while this loop runs at 60, so the
+    // large majority of frames were previously an identical redraw. The rAF
+    // callback itself is nearly free; what costs is drawImage plus the GPU
+    // upload, and skipping those took one idle crab from ~60% of a core to a
+    // few percent. Everything that can change a pixel has to be in the key.
+    const sig = `${ox}|${oy}|${unitCell}|${this.k}|${glitch && glitch.grey ? 'grey' : cur.palette}`
+      + `|${glitch ? glitch.bands.join(',') : ''}|${overlayPhase(cur.overlay, t)}`;
+    if (frame === this._lastFrame && sig === this._lastSig) {
+      requestAnimationFrame(this._raf);
+      return;
+    }
+    this._lastFrame = frame;
+    this._lastSig = sig;
+
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._paintFrame(this.off, frame, palette, ox, oy, unitCell, this.style.snap, glitch && glitch.bands);
 
     this._drawOverlay(cur.overlay, t, ox, oy);
