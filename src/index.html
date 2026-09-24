@@ -81,6 +81,10 @@
   #popover .sess { padding: 5px 6px; margin: 0 -6px; border-top: 1px solid #33302c; cursor: pointer; border-radius: 6px; }
   #popover .sess:first-of-type { border-top: none; }
   #popover .sess:hover { background: rgba(255, 255, 255, .06); }
+  /* a session with nowhere to click through to (a remote one, or any row with
+     no link_id) must not pretend to be a button */
+  #popover .sess.nolink { cursor: default; }
+  #popover .sess.nolink:hover { background: none; }
   body.panels-light #popover .sess:hover { background: rgba(0, 0, 0, .05); }
   #popover .sess .top { display: flex; align-items: center; gap: 6px; }
   #popover .dot { width: 8px; height: 8px; border-radius: 3px; flex: none; }
@@ -105,6 +109,8 @@
     box-shadow: 0 4px 18px rgba(0,0,0,.4);
   }
   #bubble:hover { border-color: #ffb08a; }
+  #bubble.nolink { cursor: default; }
+  #bubble.nolink:hover { border-color: #e89478; }
   #bubble.err { border-color: #7d7d92; }
   #bubble.err:hover { border-color: #a9a9c0; }
   #bubble .b-title { font-weight: 600; color: #e89478; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -672,9 +678,11 @@
       (POP_RANK[b.state] || 0) - (POP_RANK[a.state] || 0) || a.since_ms - b.since_ms);
     for (const s of rows) {
       const row = document.createElement('div');
-      row.className = 'sess';
-      row.title = 'open this session in the Claude app';
-      row.onclick = () => openLink(sessionLink(s));
+      const link = sessionLink(s);
+      row.className = link ? 'sess' : 'sess nolink';
+      row.title = link ? 'open this session in the Claude app'
+        : (isRemote(s) ? 'on another machine — nothing to open here' : 'no link for this session');
+      if (link) row.onclick = () => openLink(link);
       const top = document.createElement('div');
       top.className = 'top';
       const dot = document.createElement('span');
@@ -692,10 +700,12 @@
       age.dataset.since = s.since_ms;
       age.textContent = fmtAge(s.since_ms + drift);
       top.append(dot, proj);
-      if (s.surface === 'cowork') {
+      if (s.surface === 'cowork' || isRemote(s)) {
         const pill = document.createElement('span');
         pill.className = 'surface';
-        pill.textContent = 'Cowork';
+        // "remote" is the honest label: it is a Claude Code session like any
+        // other, just not on this machine
+        pill.textContent = s.surface === 'cowork' ? 'Cowork' : 'remote';
         top.appendChild(pill);
       }
       top.append(st, age);
@@ -789,14 +799,27 @@
   // hooks report is useless to the app. The claude://code/continue and
   // code/needs-input forms are gated by a server flag that flipped off
   // mid-session, so they are only the fallback when no app id is known.
+  // A session on ANOTHER machine, reaching us over the hook tunnel. Its path is
+  // '/'-rooted where a local Windows one is drive-lettered, and it can never
+  // carry a link_id — that comes only from the local desktop app's log mapping
+  // a local_ session to a CLI one, and a remote session was never a local
+  // desktop session. So there is genuinely nowhere on this machine to click
+  // through to.
+  function isRemote(s) {
+    return s.surface !== 'cowork' && !s.link_id && /^\//.test(s.cwd || '');
+  }
+
+  // '' means "no link" and openLink() then does nothing. The old fallbacks were
+  // worse than nothing: claude://code/needs-input and code/continue are behind
+  // a server flag that flipped off, so the app could not resolve them and
+  // opened a NEW chat instead — which looked like the pet sending you
+  // somewhere random. Better to offer no click than the wrong one.
   function sessionLink(s) {
     if (s.surface === 'cowork') {
-      if (s.link_id) return 'claude://claude.ai/cowork/' + encodeURIComponent(s.link_id) + '?source=desktop_action';
-      return 'claude://code/needs-input?source=desktop_action';
+      return s.link_id ? 'claude://claude.ai/cowork/' + encodeURIComponent(s.link_id) + '?source=desktop_action' : '';
     }
     if (s.link_id) return 'claude://claude.ai/epitaxy/' + encodeURIComponent(s.link_id) + '?source=desktop_action';
-    if (s.state === 'needs_input') return 'claude://code/needs-input?source=desktop_action';
-    return 'claude://code/continue?session=last&source=desktop_action';
+    return '';
   }
   function openLink(url) {
     if (IS_TAURI && url) invoke('open_claude_link', { url });
@@ -819,6 +842,11 @@
     btnsEl.hidden = true; // the bubble owns the spot below the buddy
     const top = topSession(p);
     bubEl.dataset.link = top ? sessionLink(top) : '';
+    // a bubble for a session on another machine has nowhere to go: don't offer
+    // the pointer, and say where it IS instead of looking broken
+    bubEl.classList.toggle('nolink', !bubEl.dataset.link);
+    bubEl.title = bubEl.dataset.link ? 'jump to this session'
+      : (top && isRemote(top) ? 'this session is on another machine' : '');
     bubEl.classList.toggle('err', p.state === 'error');
     bubEl.textContent = '';
     const t = document.createElement('div');
