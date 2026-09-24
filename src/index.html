@@ -180,8 +180,9 @@
     font-family: 'Segoe UI Symbol', 'Segoe UI', sans-serif;
     margin-left: auto; flex: none;
   }
-  #popover .theme-row { display: flex; gap: 5px; margin: 2px 0 8px; align-items: center; }
+  #popover .theme-row { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 0 8px; align-items: center; }
   #popover .theme-row[hidden] { display: none; } /* flex would override [hidden] */
+  #popover .tone-grp { display: flex; gap: 5px; align-items: center; }
   #popover .theme-row .lbl { color: #8a857f; font-size: 11px; margin-right: 2px; }
   #popover .theme-row button {
     background: #33343c; color: #ddd; border: 1px solid #555;
@@ -255,6 +256,22 @@
        (never re-rendered — see the skeleton note above) -->
   <div id="voice-pick" class="theme-row" hidden>
     <span class="lbl">who:</span>
+  </div>
+  <!-- each label+controls set is one inline group, so when the row wraps it
+       breaks BETWEEN them rather than orphaning a "+" on its own line -->
+  <div id="voice-tone" class="theme-row" hidden>
+    <span class="tone-grp">
+      <span class="lbl">pitch:</span>
+      <button data-tone="pitch" data-step="-0.1">&minus;</button>
+      <span class="lbl" id="pitch-readout">1.15</span>
+      <button data-tone="pitch" data-step="0.1">+</button>
+    </span>
+    <span class="tone-grp">
+      <span class="lbl">speed:</span>
+      <button data-tone="rate" data-step="-0.1">&minus;</button>
+      <span class="lbl" id="rate-readout">1.00</span>
+      <button data-tone="rate" data-step="0.1">+</button>
+    </span>
   </div>
   <div id="pop-sessions"></div>
 </div>
@@ -464,6 +481,7 @@
     artRow.hidden = !show;
     voiceRow.hidden = !show;
     voicePickRow.hidden = !show;
+    toneRow.hidden = !show;
     reportBounds();
   };
   themeRow.querySelectorAll('button[data-theme]').forEach((b) => {
@@ -545,7 +563,7 @@
     const list = voice.systemBackend.voices();
     if (voicePickBuilt || !list.length) return;
     voicePickBuilt = true;
-    list.slice(0, 5).forEach((v) => {
+    list.slice(0, 8).forEach((v) => {
       const b = document.createElement('button');
       b.dataset.voiceName = v.name;
       b.textContent = shortVoiceName(v.name);
@@ -565,6 +583,29 @@
   if (typeof speechSynthesis !== 'undefined') {
     speechSynthesis.addEventListener('voiceschanged', buildVoicePick);
   }
+
+  // --- tone: pitch and speed, previewed on every press. The Windows voices
+  //     are newsreader-flat; a small pitch lift is what makes him read as a
+  //     small colleague rather than a narrator. Tuned by ear, which is why
+  //     each press speaks. ---
+  const toneRow = document.getElementById('voice-tone');
+  const pitchReadout = document.getElementById('pitch-readout');
+  const rateReadout = document.getElementById('rate-readout');
+  function syncTone() {
+    const v = voice.get();
+    pitchReadout.textContent = Number(v.pitch).toFixed(2);
+    rateReadout.textContent = Number(v.rate).toFixed(2);
+  }
+  syncTone();
+  toneRow.querySelectorAll('button[data-tone]').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      voice.nudge(b.dataset.tone, parseFloat(b.dataset.step));
+      syncTone();
+      voice.say(sampleLine()); // speak() cancels the previous one, so rapid
+                               // presses feel responsive instead of queueing
+    };
+  });
 
   const POP_RANK = { needs_input: 6, error: 5, working: 3, thinking: 3, done: 2, idle: 1 };
   const POP_COLOR = {
@@ -690,7 +731,7 @@
     if (popEl.hidden === !open) return;
     popEl.hidden = !open;
     if (open) { positionPopover(); renderPopover(); btnsEl.hidden = true; }
-    else { themeRow.hidden = true; artRow.hidden = true; voiceRow.hidden = true; voicePickRow.hidden = true; } // reopening always starts on the session list
+    else { themeRow.hidden = true; artRow.hidden = true; voiceRow.hidden = true; voicePickRow.hidden = true; toneRow.hidden = true; } // reopening always starts on the session list
     updateBubble();
     reportBounds();
   }

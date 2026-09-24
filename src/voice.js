@@ -47,15 +47,26 @@ const MAX_CHARS = 300;
 
 // --- settings ---------------------------------------------------------
 
+// Preference order when nothing has been picked yet. Substring match on the
+// voice name, so it survives the "Microsoft X - English (United States)"
+// wrapping and works on a machine with a different set installed.
+const PREFERRED = ['Mark', 'Guy', 'David', 'Zira'];
+
 const DEFAULTS = {
   enabled: true,
   backend: 'system',
-  voiceName: '',   // '' = the browser's default for the locale
+  voiceName: '',   // '' = fall back to PREFERRED, then the browser default
   volume: 0.9,
   rate: 1,
-  pitch: 1,
+  // a touch above natural: the Windows voices are newsreader-flat, and a
+  // small lift is the difference between a narrator and a small colleague.
+  // 0-2 in the Web Speech API; past ~1.6 it turns into a chipmunk.
+  pitch: 1.15,
   speakDetail: true,
 };
+
+const LIMITS = { pitch: [0.5, 1.8], rate: [0.6, 1.6], volume: [0, 1] };
+const clamp = (v, [lo, hi]) => Math.min(hi, Math.max(lo, Math.round(v * 100) / 100));
 
 let settings = { ...DEFAULTS };
 try {
@@ -70,7 +81,16 @@ function save() {
 function get() { return { ...settings }; }
 function set(patch) {
   settings = { ...settings, ...patch };
+  for (const k of Object.keys(LIMITS)) {
+    if (typeof settings[k] === 'number') settings[k] = clamp(settings[k], LIMITS[k]);
+  }
   save();
+}
+// nudge a numeric setting by a step and return the new value (for +/- buttons)
+function nudge(key, step) {
+  if (!LIMITS[key]) return settings[key];
+  set({ [key]: (Number(settings[key]) || 0) + step });
+  return settings[key];
 }
 
 // --- text shaping -----------------------------------------------------
@@ -130,9 +150,22 @@ const systemBackend = {
     if (typeof window.speechSynthesis === 'undefined') return [];
     return speechSynthesis.getVoices().filter((v) => v.lang && v.lang.startsWith('en'));
   },
+  // the chosen voice, else the first PREFERRED one installed, else whatever
+  // the engine defaults to
+  chosen() {
+    const list = this.voices();
+    if (!list.length) return null;
+    const exact = list.find((x) => x.name === settings.voiceName);
+    if (exact) return exact;
+    for (const want of PREFERRED) {
+      const hit = list.find((x) => x.name.includes(want));
+      if (hit) return hit;
+    }
+    return null;
+  },
   speak(text) {
     const u = new SpeechSynthesisUtterance(text);
-    const v = this.voices().find((x) => x.name === settings.voiceName);
+    const v = this.chosen();
     if (v) u.voice = v;
     u.volume = settings.volume;
     u.rate = settings.rate;
@@ -207,4 +240,4 @@ async function alert({ state, kind, name, detail }) {
   return text;
 }
 
-export { alert, say, warm, stop, get, set, lineFor, sanitise, systemBackend, DEFAULTS };
+export { alert, say, warm, stop, get, set, nudge, lineFor, sanitise, systemBackend, DEFAULTS, LIMITS };
