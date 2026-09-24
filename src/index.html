@@ -1049,7 +1049,10 @@
   const treatLayer = new TreatSprite(pet, wrap);
   // the body bobs for exactly as long as he is making a noise, so the voice
   // reads as coming from HIM rather than from the machine
-  voice.onSpeaking((on) => pet.setSpeaking(on));
+  voice.onSpeaking((on, kind) => {
+    pet.setSpeaking(on);
+    pet.setSquint(on && kind === 'chirp'); // the chirp gets a scrunch, words don't
+  });
 
   const PECKISH_MS = 3 * 60 * 60 * 1000; // a few hours make him peckish
   const BITE_MS = 333;      // into the eating clip: where the first munch lands

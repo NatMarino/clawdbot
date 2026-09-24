@@ -218,15 +218,16 @@ function lineFor(state, kind, name, detail, forceGreeting) {
 // A plain callback rather than events: there is exactly one listener.
 let speakingListener = null;
 let speakingOffTimer = null;
+// fn(on, kind) — kind is 'speech' or 'chirp', because only the chirp squints
 function onSpeaking(fn) { speakingListener = fn; }
-function setSpeaking(on) {
+function setSpeaking(on, kind = 'speech') {
   clearTimeout(speakingOffTimer);
-  if (speakingListener) speakingListener(!!on);
+  if (speakingListener) speakingListener(!!on, kind);
 }
 // the chirp has no onend of its own, so it books its own silence
 function speakingFor(ms) {
-  setSpeaking(true);
-  speakingOffTimer = setTimeout(() => { if (speakingListener) speakingListener(false); }, ms);
+  setSpeaking(true, 'chirp');
+  speakingOffTimer = setTimeout(() => setSpeaking(false, 'chirp'), ms);
 }
 
 const systemBackend = {

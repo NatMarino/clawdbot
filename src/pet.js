@@ -43,6 +43,44 @@ const MOTIONS = {
 const TALK_HZ = 3.2;
 const talkBob = (secs) => Math.round(Math.sin(secs * TALK_HZ * Math.PI * 2));
 
+// Squint: a happy little scrunch while he chirps. Done as a transform on
+// whatever frame is already on screen rather than as squinting copies of
+// every pose, because the chirp can land on any of them.
+//
+// It collapses the TOPMOST run of eye rows down to a thin line and leaves
+// everything below it alone — which is what keeps the eating clip's mouth
+// open. The mouth is drawn with the same 'E' as the eyes, so a naive
+// "shrink every E" would clamp his mouth shut mid-bite. Eyes are always the
+// highest E on the body, so taking only the first run is enough.
+// Two rules find the eyes among everything else drawn with 'E':
+//   - skip any run mixed with 'w'. The done clip's checkered flag is cloth
+//     woven from E and w, and it sits ABOVE his head, so "topmost E" alone
+//     picks the flag and shreds it.
+//   - only squint a run whose rows are IDENTICAL, i.e. fully open eyes. An
+//     arch or a sad ∪ is already an expression; flattening one deletes the
+//     shape rather than scrunching it, and those poses are squinting anyway.
+const squintCache = new WeakMap();
+function squintFrame(frame) {
+  const hit = squintCache.get(frame);
+  if (hit) return hit;
+  let out = frame;
+  for (let i = 0; i < frame.length; i++) {
+    if (!frame[i].includes('E')) continue;
+    let end = i;
+    while (end + 1 < frame.length && frame[end + 1].includes('E')) end++;
+    const run = frame.slice(i, end + 1);
+    const h = run.length;
+    if (h >= 2 && !run.some((r) => r.includes('w')) && run.every((r) => r === run[0])) {
+      const keepFrom = end - Math.max(0, Math.ceil(h / 3) - 1); // keep the bottom third
+      out = frame.map((row, r) => (r >= i && r < keepFrom ? row.replace(/E/g, '#') : row));
+      break; // the first qualifying run is the eyes; anything lower is a mouth
+    }
+    i = end;
+  }
+  squintCache.set(frame, out);
+  return out;
+}
+
 // Idle nap cadence: after a random 3-8 min of uninterrupted idle the buddy
 // falls asleep; the nap ends on its own after 45s-2min. A click or drag
 // wakes it early. Deliberately much rarer than the old soccer interlude.
@@ -64,6 +102,7 @@ export class Pet {
     this._napMs = 0;
     this.speaking = false;   // an utterance is playing: bob while it does
     this._speakSince = 0;
+    this.squint = false;     // chirping: scrunch the eyes while it sounds
     this._armSleep(); // initial state is idle
     // error-state glitch: random tear-into-bands moments (see _raf)
     this._glitch = { nextAt: 0, until: 0, bands: [0, 0, 0], grey: false };
@@ -120,6 +159,10 @@ export class Pet {
     this.speaking = !!on;
     this._speakSince = performance.now();
   }
+
+  // Only the chirp squints — a spoken sentence keeps whatever face the state
+  // called for, since he is being looked at while he asks for something.
+  setSquint(on) { this.squint = !!on; }
 
   setState(state, detail = null) {
     if (!this.style.clips[state]) {
@@ -284,7 +327,7 @@ export class Pet {
       this._glitch.nextAt = 0;
     }
 
-    const frame = cur.frame;
+    const frame = this.squint ? squintFrame(cur.frame) : cur.frame;
     const palette = PALETTES[glitch && glitch.grey ? 'grey' : cur.palette];
 
     const m = (MOTIONS[cur.motion] || MOTIONS.none)(t);
