@@ -53,10 +53,32 @@ documented in the source comments of `src-tauri/src/cowork/`. An official local 
 feed from the desktop app would make all of that unnecessary; that is the feature
 request this project exists to argue for.
 
+## This fork
+
+A fork of [rubberdonut67/clawdbot](https://github.com/rubberdonut67/clawdbot) with a
+few things added on top of v0.1.1:
+
+- **Treats.** A second round button by the "+" drops a biscuit at his feet; he spots it,
+  chews it with an actual mouth, and bounces. The popover keeps a count, and the button
+  pulses softly if he has not been fed in a few hours.
+- **The speech bubble sits above him** and grows to fit, instead of hanging below his feet
+  where it is cut off when he stands on the taskbar.
+- **A voice.** He says the ask out loud on *needs input* and *error*, phrased as a question
+  from the description Claude writes for its own tool calls — "Can I commit the voice
+  changes?" — with varied greetings that only show up sometimes. Finishing a turn gets a
+  chirp rather than a sentence, because a turn ends constantly. His body squashes while he
+  talks, on a rhythm traced frame-for-frame off a hand-drawn reference.
+- **He costs a lot less.** An idle crab used to repaint 60 times a second and burn ~60% of
+  a CPU core doing nothing; it now repaints only when the picture changes and stops asking
+  for animation frames while he is still.
+
+Everything else — the reducer, both skins, the Cowork watcher — is upstream's work, and
+this fork keeps its MIT licence and attribution.
+
 ## Install
 
-Download `Clawdbot_0.1.1_x64-setup.exe` from the
-[latest release](https://github.com/rubberdonut67/clawdbot/releases/latest) and run it.
+Download `Clawdbot_*_x64-setup.exe` from the
+[latest release](https://github.com/NatMarino/clawdbot/releases/latest) and run it.
 It installs for your user only (no administrator prompt) and puts a **Clawdbot** entry
 in the Start menu and a shortcut on the desktop. It needs Windows 11 and Claude Code;
 for the Cowork side, the Claude desktop app from the Microsoft Store.
@@ -66,6 +88,12 @@ with an unknown publisher the first time; "More info" and then "Run anyway" gets
 it. Signing would need a paid certificate tied to a verified identity, which this
 project does not have. If you would rather not trust a download, build it yourself from
 the source below; the whole thing is a few thousand lines and every part of it is here.
+
+**If Windows Smart App Control is switched on, it will refuse the file outright** — no
+warning you can click through, the dialog just closes. That is a Windows policy applied
+to unsigned binaries it has not seen before, and there is no override; signing is the
+only fix. Check under Windows Security → App & browser control. Note that turning it off
+is permanent, so it is a real decision rather than a toggle.
 
 If you prefer no installer, the same release also has the bare `clawdbot.exe`: put it
 anywhere and double-click it.

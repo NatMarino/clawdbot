@@ -1,0 +1,74 @@
+# Cuts a downloadable release. Push a tag and this builds both the bare exe
+# and the NSIS installer, then attaches them to a GitHub Release so the link
+# can be handed to someone who has never seen this repo.
+#
+#   git tag v0.2.0 && git push fork v0.2.0
+#
+# The everyday `build.yml` stays as it is: it runs on every push and uploads a
+# short-lived Actions artifact, which needs a GitHub login and expires. This
+# one produces something a friend can actually download.
+#
+# Note the exe is UNSIGNED. SmartScreen will warn, and Windows Smart App
+# Control blocks unsigned binaries outright with no override — see the README.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # the bundler lives in the CLI crate; the build itself needs no Node,
+      # because tauri.conf.json's frontendDist points straight at ../src
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build exe + installer
+        working-directory: src-tauri
+        run: cargo tauri build
+
+      - name: Collect artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item src-tauri/target/release/clawdbot.exe dist/ -Force
+          Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe |
+            ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Windows 11 only. Download **`Clawdbot_*_x64-setup.exe`** for the
+            installer (per-user, no admin prompt), or **`clawdbot.exe`** to run
+            it from anywhere with no install.
+
+            The build is unsigned, so SmartScreen shows "Windows protected your
+            PC" — *More info* then *Run anyway*. If Windows **Smart App
+            Control** is switched on it will block the file silently with no
+            override; that is a Windows policy, not a bug, and signing is the
+            only fix.
+
+            After installing, wire up the hooks or he cannot see your Claude
+            Code sessions — see the README.
