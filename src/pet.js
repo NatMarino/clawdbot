@@ -74,6 +74,14 @@ function overlayPhase(kind, t) {
   }
 }
 
+// Idling the render loop itself: after this many unchanged ticks, stop asking
+// for animation frames and poll slowly instead. 15Hz still samples every
+// motion here comfortably — they are integer-quantised and change a handful
+// of times a second — and a state that is genuinely animating never gets
+// here, because any repaint resets the counter.
+const STILL_TICKS = 8;      // ~130ms at 60fps
+const STILL_TICK_MS = 66;   // ~15Hz
+
 // Squash the BODY by `frac` of its own height while the feet stay exactly
 // where they are. An offset on the whole sprite (what this used to be) makes
 // him hover; what reads as a soft body is the silhouette getting shorter
@@ -176,6 +184,7 @@ export class Pet {
     this.squint = false;     // chirping: scrunch the eyes while it sounds
     this._lastFrame = null;  // repaint gating: what is currently on the canvas
     this._lastSig = null;
+    this._still = 0;         // consecutive ticks with nothing to repaint
     this._armSleep(); // initial state is idle
     // error-state glitch: random tear-into-bands moments (see _raf)
     this._glitch = { nextAt: 0, until: 0, bands: [0, 0, 0], grey: false };
@@ -210,6 +219,7 @@ export class Pet {
     this.ctx = this.canvas.getContext('2d');
     this.ctx.imageSmoothingEnabled = false;
     this._lastSig = null; // resizing blanks the canvas: the repaint key is stale
+    this._still = 0;
     this._emit('scale', this.scale);
   }
 
@@ -237,7 +247,7 @@ export class Pet {
 
   // Only the chirp squints — a spoken sentence keeps whatever face the state
   // called for, since he is being looked at while he asks for something.
-  setSquint(on) { this.squint = !!on; }
+  setSquint(on) { this.squint = !!on; this._still = 0; }
 
   setState(state, detail = null) {
     if (!this.style.clips[state]) {
@@ -429,9 +439,11 @@ export class Pet {
     const sig = `${ox}|${oy}|${unitCell}|${this.k}|${glitch && glitch.grey ? 'grey' : cur.palette}`
       + `|${glitch ? glitch.bands.join(',') : ''}|${overlayPhase(cur.overlay, t)}`;
     if (frame === this._lastFrame && sig === this._lastSig) {
-      requestAnimationFrame(this._raf);
+      this._still++;
+      this._schedule();
       return;
     }
+    this._still = 0;
     this._lastFrame = frame;
     this._lastSig = sig;
 
@@ -440,7 +452,17 @@ export class Pet {
 
     this._drawOverlay(cur.overlay, t, ox, oy);
 
-    requestAnimationFrame(this._raf);
+    this._schedule();
+  }
+
+  // Asking for an animation frame keeps the compositor awake at 60Hz even on
+  // the ticks that paint nothing — which, after the gate above, is most of
+  // them. Once half a second has passed with the picture unchanged, drop to a
+  // slow timer; any change at all puts it straight back on rAF. Worst case
+  // entering an animated state is one slow tick of latency.
+  _schedule() {
+    if (this._still > STILL_TICKS) setTimeout(this._raf, STILL_TICK_MS);
+    else requestAnimationFrame(this._raf);
   }
 
   // Paint a frame with its top-left at canvas units (ux, uy), `unitCell`
